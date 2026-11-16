@@ -7,8 +7,8 @@ kind like codex/copilot: `cursor-agent -p "<prompt>" --output-format text` runs 
 prompt non-interactively and writes the clean final answer to STDOUT, then exits.
 No transcript-scraping — we read the answer from stdout. Verified against
 cursor-agent 2026.07.23 on Windows (bumped from 2026.07.08), and re-verified on
-2026.08.11 and 2026.10.14 (ask, continue, and ask mode refusing a write and a
-shell command). Everything the bridge
+2026.08.11, 2026.10.14 and 2026.11.05 (ask, continue, and ask mode refusing a
+write; 2026.10.14 also a shell command). Everything the bridge
 depends on structurally still holds — `create-chat` mints an id, `models` lists,
 `status` reports auth, every flag we pass is still in --help, and the on-disk
 chats/<id>/meta.json cwd layout the continue fallback reads is unchanged. The one
@@ -403,6 +403,7 @@ def list_models() -> list[str]:
     try:
         proc = proc_tree.run_captured(
             [*_launch(), "models"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
             timeout=20,
             **_TEXT,
@@ -666,6 +667,7 @@ def cursor_version() -> Optional[str]:
     try:
         proc = proc_tree.run_captured(
             [*_launch(), "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
             timeout=15,
             **_TEXT,
@@ -688,6 +690,7 @@ def auth_status() -> tuple[bool, str]:
     try:
         proc = proc_tree.run_captured(
             [*_launch(), "status"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
             timeout=20,
             **_TEXT,

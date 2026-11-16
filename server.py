@@ -23,8 +23,8 @@ must have logged in interactively at least once via the Antigravity IDE or
 `agy -i`. Uses the same AI Pro quota. The bridge itself only does cross-
 platform filesystem reads under `~/.gemini/antigravity-cli/`.
 
-Model: defaults to agy's settings.json "model" field (gemini-3.8-flash-high as of
-agy 1.1.25).
+Model: defaults to agy's settings.json "model" field, and to agy's own default
+where that is unset (Gemini 4 Argon (Medium) on agy 1.4.12 and 1.5.1, checked in a clean HOME).
 agy 1.0.5 added a --model flag (and a `models` subcommand); through
 ~1.0.14 switching to a DIFFERENT model in -p HUNG the call (verified on 1.0.5:
 the active label returned in seconds, any other hung >60s), so the bridge kept
@@ -44,21 +44,23 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.3.5) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.5.1) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` emits
 those slugs (bare through 1.1.10; as `<slug>\t<human label>` from 1.1.11 on — see
-_parse_models_output). The live list (re-read on 1.3.5) is:
-gemini-3.8-flash-{low,medium,high}, claude-opus-5-5-{low,medium,high},
-claude-sonnet-5-5-{low,medium,high}, gpt-oss-120b-medium — 1.1.6 ADDED the
-gemini-3.6-flash family and moved the settings.json default to it, the
-gemini-3.7-flash family arrived by 1.1.16 and took the default in turn, and 1.1.25
-added gemini-3.8-flash and moved the default onto THAT (verified live through this
-bridge: a call passing no `model` at all answered "Gemini 3.8 Flash"). Somewhere
-between 1.2.11 and 1.3.5 the catalog shrank to the list above: gemini-3.7-flash,
-gemini-3.6-flash, gemini-3.1-pro, claude-sonnet-4-6 and claude-opus-4-6-thinking
-went, the two Claude 5.5 families came in, each with three effort variants, and
-no changelog entry says so. The default stayed on Gemini 3.8 Flash (High).
+_parse_models_output). The live list (re-read on 1.5.1) is:
+gemini-4-argon-{low,medium,high}, gemini-3.8-flash-{low,medium,high},
+claude-opus-5-5-{low,medium,high}, claude-sonnet-5-5-{low,medium,high},
+gpt-oss-120b-medium. 1.1.6 ADDED the gemini-3.6-flash family and moved the
+settings.json default to it, the gemini-3.7-flash family arrived by 1.1.16 and
+took the default in turn, and 1.1.25 added gemini-3.8-flash and moved the default
+onto THAT (verified live through this bridge: a call passing no `model` at all
+answered "Gemini 3.8 Flash"). Somewhere between 1.2.11 and 1.3.5 the catalog
+shrank: gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, claude-sonnet-4-6 and
+claude-opus-4-6-thinking went, the two Claude 5.5 families came in, each with
+three effort variants, and no changelog entry says so. The default stayed on
+Gemini 3.8 Flash (High). By 1.4.12 the gemini-4-argon family had arrived, and
+with no model in settings.json agy now picks Gemini 4 Argon (Medium).
 
 Two things about the 3.8 arrival are worth keeping. Its changelog entry scopes it
 to "when connecting with a `GEMINI_API_KEY`", but it is in the catalog on the
@@ -466,20 +468,36 @@ from fastmcp import Context, FastMCP
 
 import proc_tree
 
-# Server-level instructions. The MCP client sends these to its model on connect
-# (Claude Code surfaces them as an "MCP Server Instructions" block), so EVERY
-# user who installs the bridge gets their host model taught how and WHEN to reach
-# for these tools — without ever opening the README. Keep this a tight ROUTING
-# guide, not a manual: it costs context tokens in every session, and per-tool
-# detail already lives in each tool's own description/annotations. The highest-
-# value content here is what a model can't infer from tool schemas alone —
-# proactive triggers, which backend to pick, and the workspace footgun.
+# Server-level instructions: the routing guide. An MCP client may send these to its
+# model on connect, so a host model learns how and WHEN to reach for these tools
+# without anyone opening the README. Not every host does (measured 2026-11, 0.36):
+#   - Claude Code 2.1.319 cuts instructions AND each tool description at 4,096 chars
+#     (older versions at 2,048);
+#   - Copilot forwards them only with --allow-all-mcp-server-instructions;
+#   - the agy CLI forwards neither instructions nor descriptions up front.
+# So the text is ORDERED for truncation: the offer trigger, a one-line picker and
+# the workspace rule come first and stand on their own within ~1,900 chars; per-
+# backend detail, mechanics, the status/version relay and watch follow, and
+# Security is last. The largest variant (every backend on) stays <= 3,800 chars,
+# which a test pins. What a host never shows is covered twice more: every tool
+# description repeats the workspace rule and its own routing sentence, and
+# `agent-intern rules` prints this exact text for a host's own rules file.
 #
 # The text is assembled from the backends AGENT_INTERN_BACKENDS turns on (see
 # _parse_backends), so it never routes the model to a tool the server dropped.
 
 # Every backend, in the order the instructions list them.
-BACKENDS = ("antigravity", "codex", "copilot", "cursor", "grok", "opencode", "kimi", "muse")
+BACKENDS = (
+    "antigravity",
+    "codex",
+    "copilot",
+    "cursor",
+    "claude",
+    "grok",
+    "opencode",
+    "kimi",
+    "muse",
+)
 
 # The backends agent_swarm can dispatch to: all but Kimi.
 _SWARM_BACKENDS = frozenset(BACKENDS) - {"kimi"}
@@ -492,47 +510,53 @@ _BACKEND_TITLES = {
     "codex": "OpenAI Codex",
     "copilot": "GitHub Copilot",
     "cursor": "Cursor",
+    "claude": "Claude Code",
     "grok": "Grok Build (xAI, EXPERIMENTAL)",
     "opencode": "opencode (any model, incl. FREE ones)",
     "kimi": "Kimi Code (Moonshot, EXPERIMENTAL)",
     "muse": "Muse Code (Meta, EXPERIMENTAL)",
 }
 
-# Each backend's line under "Pick a backend".
+# Each backend's clause in the one-line picker near the top.
+_BACKEND_PICKS = {
+    "antigravity": "antigravity_* for fast, cheap calls and images",
+    "codex": "codex_* for the hardest reasoning and a real OS sandbox",
+    "copilot": "copilot_* on a Copilot plan",
+    "cursor": "cursor_* on a Cursor plan (GPT/Claude/Grok models)",
+    "claude": "claude_* for large refactors and careful reviews",
+    "grok": "grok_* on a SuperGrok plan",
+    "opencode": "opencode_* when the user has no subscription (free models)",
+    "kimi": "kimi_* on a Kimi plan",
+    "muse": "muse_* on a Muse plan",
+}
+
+# Each backend's detail line under "Backends".
 _BACKEND_GUIDES = {
     "antigravity": """\
-- antigravity_* (Gemini) — fast, cheap tool-calling; the ONLY image model. No \
-real sandbox, so trusted prompts only.""",
+- antigravity_* (Gemini) — the only image model; no real sandbox.""",
     "codex": """\
-- codex_* (OpenAI) — strongest reasoning and real repo edits behind a REAL \
-enforced sandbox (read-only by default; pass sandbox="workspace-write" to let \
-it edit files).""",
+- codex_* (OpenAI) — a REAL OS sandbox: read-only by default, \
+sandbox="workspace-write" to let it edit.""",
     "copilot": """\
-- copilot_* (GitHub) — agentic coding on a Copilot plan; sandbox is best-effort, \
-not an OS boundary.""",
+- copilot_* (GitHub) — best-effort sandbox, not an OS boundary.""",
     "cursor": """\
-- cursor_* (Cursor) — agentic coding on a Cursor plan, with a wide model menu \
-(GPT/Claude/Grok/Composer via `model`); sandbox is agent-enforced (read-only = \
-ask mode), not an OS boundary.""",
+- cursor_* (Cursor) — wide model menu via `model`; agent-enforced sandbox \
+(read-only = ask mode).""",
+    "claude": """\
+- claude_* (Claude Code) — agent-enforced sandbox; workspace-write edits files \
+but runs no shell.""",
     "grok": """\
-- grok_* (Grok Build, xAI — EXPERIMENTAL, never live-verified) — needs SuperGrok \
-/ X Premium+ or XAI_API_KEY. Real OS sandbox, but on LINUX/macOS ONLY: on Windows \
-it silently does not enforce, so read-only there rests on a tool allowlist.""",
+- grok_* (Grok Build, EXPERIMENTAL, never live-verified) — needs SuperGrok or \
+XAI_API_KEY; its OS sandbox works on Linux/macOS only.""",
     "opencode": """\
-- opencode_* (opencode, SST) — the ONLY backend that needs no subscription: its \
-free `opencode/*` models answer with zero credentials, so reach for it when the \
-user has no other plan, when you want a model family none of the others cover, \
-or to spare a paid quota. Add a key for Claude/GPT-class models. Sandbox is \
-agent-enforced (a permission policy), not an OS boundary, but it behaves the \
-same on every platform. Free models are SLOW — allow minutes, not seconds.""",
+- opencode_* (opencode) — free `opencode/*` models need no account and answer in \
+seconds; add a key for Claude/GPT-class models. Agent-enforced sandbox.""",
     "kimi": """\
-- kimi_* (Kimi Code, Moonshot — EXPERIMENTAL, never live-verified) — Kimi K2 \
-family; like antigravity it has NO sandbox and auto-executes tools, so trusted \
-prompts only. Needs `kimi login` or an API key.""",
+- kimi_* (Kimi Code, EXPERIMENTAL, never live-verified) — NO sandbox; needs \
+`kimi login` or an API key.""",
     "muse": """\
-- muse_* (Muse Code, Meta — EXPERIMENTAL; real model never live-verified) — Muse \
-Spark models; needs a Muse plan (`muse login`) or META_API_KEY. read-only switches \
-its write/shell/web tools off, so it holds on every OS.""",
+- muse_* (Muse Code, EXPERIMENTAL, real model unverified) — needs a Muse plan or \
+META_API_KEY; read-only switches its write/shell/web tools off.""",
 }
 
 
@@ -553,96 +577,119 @@ def _parse_backends(raw: Optional[str]) -> tuple[tuple[str, ...], list[str]]:
 
 
 def _server_instructions(enabled: tuple[str, ...]) -> str:
-    """The routing guide, covering only the `enabled` backends and their tools."""
+    """The routing guide, covering only the `enabled` backends and their tools.
+
+    Ordered for hosts that truncate it: see the note above BACKENDS."""
     titles = [_BACKEND_TITLES[b] for b in enabled]
     named = titles[0] if len(titles) == 1 else ", ".join(titles[:-1]) + " and " + titles[-1]
-    clis = "an external coding CLI" if len(enabled) == 1 else "external coding CLIs"
+    gains = "spends that quota instead of your tokens"
     if "antigravity" in enabled:
-        gains = (
-            "spends that quota instead of your tokens, gets a second model-family "
-            "opinion, or generates images"
-        )
+        gains += ", gets a second model-family opinion, and can generate images"
     else:
-        gains = "spends that quota instead of your tokens or gets a second model-family opinion"
-    intro = f"""\
-This server bridges {clis} — {named} — into your session as sub-agents that run \
-on the USER'S OWN quota. Delegating here {gains}."""
+        gains += " and gets a second model-family opinion"
+    intro = (
+        f"This server runs {named} as sub-agents on the USER'S OWN quota. Delegating here {gains}."
+    )
 
     triggers = []
     if "antigravity" in enabled:
-        triggers.append("""\
-- the user wants an IMAGE — antigravity_image is your only image generator \
-(antigravity_image_swarm for several at once). A slow one answers `status: \
-running` with a job_id; collect it with antigravity_job_result.""")
+        triggers.append("- an IMAGE: antigravity_image (antigravity_image_swarm for several); "
+                        "a slow one returns `status: running` + job_id, collect it with "
+                        "antigravity_job_result.")
     if _SWARM_BACKENDS.intersection(enabled):
-        triggers.append("""\
-- a job splits into many independent sub-tasks — agent_swarm runs them in \
-parallel, mixing any backends in one call.
-- the user wants something JUDGED, RESEARCHED or ATTACKED by several models — \
-preset_swarm runs a ready-made panel in one call: jury (rubric scores, \
-aggregated), research, red-team, council (code review). swarm_presets lists them.""")
-    triggers.append("""\
-- the work is bulk and mechanical (a rename across 30 files, boilerplate, a \
-first-pass port) — cheap for a sub-agent, expensive in your context.
-- you want a heavier or different-family model's take: a second opinion on a \
-risky diff, or a design call where one model's blind spot is the whole risk.""")
+        triggers.append(
+            "- many independent sub-tasks: agent_swarm runs them in parallel, mixing "
+            "backends.\n"
+            "- something to JUDGE, RESEARCH or ATTACK with several models: preset_swarm "
+            "(jury, research, red-team, council; swarm_presets lists them)."
+        )
+    triggers.append(
+        "- bulk, mechanical work (a rename across 30 files, boilerplate, a first-pass "
+        "port).\n"
+        "- a heavier or different-family second opinion on a risky diff or design call."
+    )
 
+    picks = "; ".join(_BACKEND_PICKS[b] for b in enabled)
     guides = [_BACKEND_GUIDES[b] for b in enabled]
     if _EXPERIMENTAL_BACKENDS.intersection(enabled):
-        guides.append("""\
-The experimental backends are unproven end-to-end: run their *_status first, and \
-tell the user plainly if one fails rather than retrying blindly.""")
-    pick = "Pick a backend:" if len(enabled) > 1 else "The backend:"
+        guides.append(
+            "Run an EXPERIMENTAL backend's *_status first, and tell the user plainly "
+            "if it fails rather than retrying."
+        )
 
     return f"""\
 {intro}
 
-Reach for these tools when:
-{chr(10).join(triggers)}
-
 {_INSTRUCTIONS_OFFER}
+{chr(10).join(triggers)}
+{_INSTRUCTIONS_DONT}
 
-{pick}
+Pick: {picks}.
+
+{_INSTRUCTIONS_WORKSPACE}
+
+Backends:
 {chr(10).join(guides)}
 
 {_INSTRUCTIONS_MECHANICS}"""
 
 
 _INSTRUCTIONS_OFFER = """\
-OFFER IT — don't wait to be asked. On a task that fits the triggers above, say \
-so in ONE line before you start: name the backend, the reason, and ask. \
-("This is 6 independent files — want me to farm them out in parallel instead \
-of grinding through them here?") The user is paying for these plans \
-already; a delegation they never hear about is one they can never take. Then \
-respect the answer: ask ONCE per task, never once per turn, and if they decline, \
-drop it for the rest of that task. Delegate without asking only for images, or \
-where the user has already said to delegate this kind of work.
+OFFER IT — don't wait to be asked. When a task fits one of these, say so in ONE \
+line before you start (backend and reason) and ask. Ask once per task; if the user \
+declines, drop it for that task. Delegate without asking only for images, or where \
+the user already said to:"""
 
-Don't offer, and don't delegate, when the job is a couple of tool calls, when it \
-leans on context only this conversation has, or when the ~10-30s round trip costs \
-more than just doing it. A suggestion on every task is nagging, not help."""
+_INSTRUCTIONS_DONT = """\
+Don't offer for a couple of tool calls, for work that leans on context only this \
+conversation has, or when the ~10-30 s round trip costs more than doing it."""
+
+_INSTRUCTIONS_WORKSPACE = """\
+ALWAYS pass workspace=<the project dir>. It defaults to the server's cwd, so \
+without it the sub-agent sees no repo: the most common mistake."""
 
 _INSTRUCTIONS_MECHANICS = """\
 Mechanics:
-- Pass `workspace` = the relevant project directory. It defaults to the server's \
-cwd, so WITHOUT it the sub-agent answers with no repo context — this is the most \
-common mistake.
-- *_continue resumes the thread rooted at a workspace; swarm workers are \
-one-shot (no continue).
-- watch=true opens a live browser view of the agent working (identical return \
-value).
-- *_status checks a backend is installed and logged in, and spends no quota — \
-use it if a call reports "not found". Its `bridge version` row also says when a \
-NEWER bridge release is out; if it does, tell the user in one line and give the \
-upgrade command the row names. The startup notice for this only reaches the \
-host's logs, so relaying it is the one way they hear about it.
+- *_continue resumes the thread rooted at that workspace; swarm workers are \
+one-shot.
+- *_status spends no quota: run it when a call says "not found". Its `bridge \
+version` row says when a newer agent-intern release is out; if so, tell the user \
+in one line, with the upgrade command it names. Nobody else will.
+- watch=true opens a live browser view of the agent (same return value).
 
-Security: every backend here runs as an autonomous agent, and only a real OS \
-sandbox (see each backend above) is a hard boundary. Use only with trusted \
-prompts on trusted content."""
+Security: every backend is an autonomous agent, and only a real OS sandbox is a \
+hard boundary. Use trusted prompts on trusted content only."""
+
+
+def _claude_hidden_in_claude_code(
+    enabled: tuple[str, ...], raw: Optional[str], env=None
+) -> tuple[tuple[str, ...], bool]:
+    """(`enabled` minus claude, True) when this server's host is Claude Code.
+
+    Claude Code sets CLAUDECODE=1 for the processes it starts, this server included,
+    and a claude backend there is the host delegating to itself: the same quota,
+    spent twice. So it is left out unless AGENT_INTERN_BACKENDS names claude
+    explicitly, which always wins. `raw` is AGENT_INTERN_BACKENDS as read."""
+    env = os.environ if env is None else env
+    if env.get("CLAUDECODE") != "1" or "claude" not in enabled:
+        return enabled, False
+    named = {n.lower() for n in re.split(r"[,\s]+", (raw or "").strip()) if n}
+    if "claude" in named:
+        return enabled, False
+    rest = tuple(b for b in enabled if b != "claude")
+    return (rest or enabled), bool(rest)
+
+
+CLAUDE_HIDDEN_NOTE = (
+    "claude is off because the host is Claude Code (CLAUDECODE=1); to turn it on "
+    "anyway, name claude in AGENT_INTERN_BACKENDS"
+)
 
 # Read once at import, like AGY_BIN below; the launching process's environment wins.
 ENABLED_BACKENDS, _UNKNOWN_BACKENDS = _parse_backends(os.environ.get("AGENT_INTERN_BACKENDS"))
+ENABLED_BACKENDS, CLAUDE_HIDDEN = _claude_hidden_in_claude_code(
+    ENABLED_BACKENDS, os.environ.get("AGENT_INTERN_BACKENDS")
+)
 
 SERVER_INSTRUCTIONS = _server_instructions(ENABLED_BACKENDS)
 
@@ -650,7 +697,7 @@ SERVER_INSTRUCTIONS = _server_instructions(ENABLED_BACKENDS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.33.0"
+__version__ = "0.37.1"
 
 # Passed explicitly: without it the MCP handshake's serverInfo.version reports
 # fastmcp's own version, not the bridge's.
@@ -686,6 +733,55 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
+#
+# 1.5.8 re-verification (live, Windows, 2026-11-13): five releases from 1.5.3, no
+# break. Ask and continue in the same conversation on gemini-3.8-flash-high, a
+# watched ask (the viewer state carried the model), `--model gemini-4-hydrogen`
+# (base name) and `--model gemini-4-hydrogen-high`, and a two-worker read-only swarm
+# on gemini-4-hydrogen-high all answered. The DRIFT is the catalog: a
+# gemini-4-hydrogen family (low, medium, high, xhigh) and
+# gemini-pro-orchestrator-g1-pro ("Orchestrator (Argon)") are new in `agy models`;
+# the 1.5.8 changelog lists Hydrogen only for API-key / ADC / gateway sign-ins, yet
+# an AI Pro login lists and answers it. The orchestrator slug was NOT called.
+# 1.5.7 made headless `-p` start in Auto agent mode (it held with
+# --dangerously-skip-permissions). Not re-checked on 1.5.8: an image, plan mode
+# with a tool call, `schema`, the default model in a clean HOME (this machine's
+# settings.json pins Gemini 4 Argon (High)). Host loads held: a fresh Claude Code
+# session (29 tools) and a fresh agy session (32), each answering an ask.
+#
+# 1.5.3 re-verification (live, Windows, 2026-11-09, feat/0.36): ask, continue, an
+# image, a two-worker swarm and a cut-short turn (the 1.5.0 exit-3 timeout) held;
+# nothing in 1.5.2/1.5.3 touches the bridge's path. The model list, the default
+# model and base names were NOT re-checked on 1.5.3 (see the 1.5.1 note).
+#
+# 1.5.1 re-verification (live, Windows, 2026-11-05, this branch): two releases and
+# one REAL change. Ask, continue in the same conversation, an image, a two-worker
+# swarm, `agy models` (the same 13 suffixed slugs), `/usage` and `/model` held, and
+# an antigravity_ask through this server hosted by agy itself answered. 1.5.0 made
+# an expired --print-timeout EXIT 3 (status ERROR, finished_reason print_timeout,
+# an AGY_ERROR DEADLINE_EXCEEDED line plus the old stderr mark), where 1.2.0-1.4.x
+# exited 0; every runner here raised "agy exited 3" before its timeout check ran.
+# The check now comes first (see _run_agy), verified live with a 6 s timeout. agy
+# also accepts an effort-less base name (`--model gemini-4-argon`), which
+# validate_model now does too. Not re-checked: watch mode, image swarm, plan mode,
+# schema.
+#
+# 1.4.12 re-verification (live, Windows): fourteen releases and a minor bump, no
+# break. Ask on the default model, continue in the same conversation, an image, a
+# two-worker swarm, `--model gemini-4-argon-high`, `/usage` and `/changelog` (both
+# still answered by the CLI, no conversation left behind) all held. 1.4.7 stopped
+# headless runs from "rendering the transcript for display", but the JSONL
+# transcript is still written: the swarm workers, which read nothing else, answered.
+# 1.4.11 added `finished_reason` to the json and stream-json results (see
+# _FINISHED_EARLY_REASONS); an expired --print-timeout reports "print_timeout" and
+# still exits 0 with status SUCCESS and the same stderr line, so the old check held
+# and the field is a second signal. Only print_timeout was seen live; "error" and
+# "interrupted" are handled as the changelog describes them. The drift is the model
+# catalog once more: a gemini-4-argon family (low, medium, high), in no changelog
+# entry until 1.4.3 fixed it for GEMINI_API_KEY users, and agy's own default moved
+# onto it: in a clean HOME with no settings.json, 1.4.12 picked Gemini 4 Argon
+# (Medium). `/usage` gained a matching "Gemini 4 Argon" family whose limit is named
+# "Gemini 4 Argon Weekly Limit" (no "Remaining"), which the parser already handled.
 #
 # 1.3.5 re-verification (live, Windows): thirteen releases and a minor bump, no
 # break. Ask on the default model, continue pinning the same conversation, a
@@ -739,8 +835,9 @@ _AGY_LOCK = threading.Lock()
 # self-updated, and antigravity_status dutifully reported "newest transcript [!!]"
 # for it. The read path was fine -- the very next bridge call wrote a real
 # transcript and status went green -- so an empty newest-conversation is a stale
-# artifact, not a regression.
-VERIFIED_AGY_VERSION = (1, 3, 5)
+# artifact, not a regression. (Issue #8: the row now skips such conversations, and
+# ones still running or whose turn failed; see _transcript_status_row.)
+VERIFIED_AGY_VERSION = (1, 5, 8)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -987,6 +1084,7 @@ def _get_agy_version() -> Optional[str]:
     try:
         proc = proc_tree.run_captured(
             [AGY_BIN, "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
             **_TEXT,
             timeout=15,
@@ -1480,7 +1578,10 @@ def _backends_status() -> tuple[str, bool, str]:
     detail = f"on: {', '.join(ENABLED_BACKENDS)}"
     if off:
         detail += f"; off: {', '.join(off)}"
-    detail += " (AGENT_INTERN_BACKENDS)"
+    if os.environ.get("AGENT_INTERN_BACKENDS", "").strip():
+        detail += " (AGENT_INTERN_BACKENDS)"
+    if CLAUDE_HIDDEN:
+        detail += f"; {CLAUDE_HIDDEN_NOTE}"
     if _UNKNOWN_BACKENDS:
         detail += (
             f"; ignored unknown name(s) {', '.join(map(repr, _UNKNOWN_BACKENDS))}"
@@ -1496,7 +1597,101 @@ def _bridge_status_rows() -> list[tuple[str, bool, str]]:
     rows = [_bridge_version_status()]
     if ENABLED_BACKENDS != BACKENDS or _UNKNOWN_BACKENDS:
         rows.append(_backends_status())
+    depth = proc_tree.current_depth()
+    if depth >= proc_tree.MAX_DEPTH:
+        rows.append(
+            (
+                "nesting",
+                False,
+                f"delegation from here is refused: this server is {depth} agents deep "
+                f"({proc_tree.DEPTH_ENV}={depth}, limit {proc_tree.MAX_DEPTH}); the checks "
+                "below still run",
+            )
+        )
     return rows
+
+
+# How many of the newest conversations _transcript_status_row tries before it calls
+# the read path broken.
+_TRANSCRIPT_PROBE_LIMIT = 10
+# A conversation touched this recently may still be running (another bridge call, a
+# swarm worker, agy's own UI), so failing to read it is no evidence of anything.
+_TRANSCRIPT_IN_PROGRESS_S = 300.0
+
+
+def _conversations_newest_first(limit: int) -> list[tuple[str, float]]:
+    """(conversation id, brain-dir mtime) for the `limit` newest conversations."""
+    if not BRAIN_DIR.is_dir():
+        return []
+    convs: list[tuple[str, float]] = []
+    for child in BRAIN_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            convs.append((child.name, child.stat().st_mtime))
+        except OSError:
+            continue
+    convs.sort(key=lambda c: c[1], reverse=True)
+    return convs[:limit]
+
+
+def _conversation_is_empty(conv_id: str) -> bool:
+    """No transcript entries and no SQLite store: nothing was ever written to read.
+
+    agy leaves such a brain dir behind when it self-updates (just empty
+    .user_uploaded/ and scratch/ folders, seen on 1.1.24)."""
+    return not _transcript_entries(conv_id) and not (CONVERSATIONS_DIR / f"{conv_id}.db").exists()
+
+
+def _transcript_status_row() -> tuple[str, bool, str]:
+    """Status row for the read path: can the bridge still read agy's answers?
+
+    Issue #8: this used to read only the single newest conversation, and that one
+    is often not finished. agy may have left it empty while self-updating, another
+    bridge call or a swarm worker may be running it right now, or its turn may have
+    failed (a quota error, a soft-denied tool) without writing an answer. Each of
+    those flipped Overall to PROBLEMS FOUND while every call worked, and a calling
+    agent then read that as "agy is broken".
+
+    What the row is for is a change in agy's transcript format, and that breaks
+    every conversation, not one. So: walk the newest _TRANSCRIPT_PROBE_LIMIT and
+    report ok at the first readable answer. Fail only when none is readable and at
+    least one of them is neither empty nor recent enough to still be running.
+    """
+    label = "newest transcript"
+    convs = _conversations_newest_first(_TRANSCRIPT_PROBE_LIMIT)
+    if not convs:
+        return (label, True, "no conversations yet")
+    now = time.time()
+    skipped = 0
+    suspect: Optional[str] = None
+    for conv_id, mtime in convs:
+        try:
+            _read_response(conv_id)
+        except RuntimeError as e:
+            skipped += 1
+            if (
+                suspect is None
+                and now - mtime > _TRANSCRIPT_IN_PROGRESS_S
+                and not _conversation_is_empty(conv_id)
+            ):
+                suspect = str(e)
+            continue
+        if skipped:
+            return (
+                label,
+                True,
+                f"readable (skipped {skipped} newer without a finished answer: "
+                "empty, still running or failed)",
+            )
+        return (label, True, "readable")
+    if suspect is None:
+        return (
+            label,
+            True,
+            f"nothing finished to read yet (the {len(convs)} newest are empty or still running)",
+        )
+    return (label, False, f"none of the {len(convs)} newest is readable: {suspect}"[:160])
 
 
 def _collect_status() -> list[tuple[str, bool, str]]:
@@ -1508,7 +1703,13 @@ def _collect_status() -> list[tuple[str, bool, str]]:
     AGY_BRIDGE_NO_UPDATE_CHECK is set) makes one best-effort GitHub call to report
     whether a newer bridge release exists.
     """
-    rows: list[tuple[str, bool, str]] = _bridge_status_rows()
+    return _bridge_status_rows() + _agy_status_rows()
+
+
+def _agy_status_rows() -> list[tuple[str, bool, str]]:
+    """agy's own rows of _collect_status, without the bridge rows every backend
+    shares (`agent-intern doctor` prints those once, not per backend)."""
+    rows: list[tuple[str, bool, str]] = []
 
     version = _parse_agy_version(_get_agy_version() or "")
     if version is None:
@@ -1530,15 +1731,7 @@ def _collect_status() -> list[tuple[str, bool, str]]:
 
     rows.append(("last_conversations.json", LAST_CONVERSATIONS.exists(), str(LAST_CONVERSATIONS)))
 
-    newest = _find_newest_conv_after(0.0)
-    if newest is None:
-        rows.append(("newest transcript", True, "no conversations yet"))
-    else:
-        try:
-            _read_response(newest)
-            rows.append(("newest transcript", True, "readable"))
-        except RuntimeError as e:
-            rows.append(("newest transcript", False, str(e)[:80]))
+    rows.append(_transcript_status_row())
 
     if CONVERSATIONS_DIR.exists():
         n = sum(1 for _ in CONVERSATIONS_DIR.glob("*.db"))
@@ -1828,6 +2021,7 @@ def _read_agy_usage() -> Optional[str]:
     try:
         proc = proc_tree.run_captured(
             [AGY_BIN, "--print-timeout", "20s", "-p", "/usage"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
             **_TEXT,
             timeout=25,
@@ -1846,35 +2040,49 @@ def _percent_remaining(value: str) -> Optional[float]:
         return None
 
 
-def _parse_usage_rows(stdout: str) -> list[tuple[str, bool, str]]:
-    """agy's `/usage` table as status rows, one per model family.
+def _parse_usage_table(stdout: str) -> dict[str, list[tuple[str, str, str]]]:
+    """agy's `/usage` table grouped by model family: {family: [(limit, remaining, resets)]}.
 
     agy 1.1.11+ prints one tab-separated record per limit:
 
         Gemini Models\tWeekly Limit Remaining\t100%\t2026-08-11T18:50:23Z
 
-    i.e. family, limit name, remaining share, reset time. We group by family in
-    first-seen order and keep the remaining share, dropping the reset timestamps —
-    they are the least useful column in a one-line status row.
-
-    A family whose remaining share has hit 0% is reported NOT ok: every call
-    against it will fail until the window resets, which is exactly the kind of
-    thing this tool exists to surface before the user spends a call finding out.
-    Unrecognized lines are skipped rather than raising — agy's format may change
-    again, and a status probe must never be the thing that breaks.
+    i.e. family, limit name, remaining share, reset time. Families keep their
+    first-seen order. The limit name loses its " Limit Remaining" tail ("Weekly");
+    a family-specific limit keeps its own prefix ("Gemini 4 Argon Weekly", from
+    "Gemini 4 Argon Weekly Limit", as agy 1.4.12 prints it). Unrecognized lines are
+    skipped rather than raising — agy's format may change again, and a status probe
+    must never be the thing that breaks.
     """
-    families: dict[str, list[tuple[str, str]]] = {}
+    families: dict[str, list[tuple[str, str, str]]] = {}
     for line in stdout.splitlines():
         fields = [f.strip() for f in line.split("\t")]
         if len(fields) < 3 or not fields[0] or not fields[2]:
             continue
         limit = fields[1].removesuffix(" Remaining").removesuffix(" Limit")
-        families.setdefault(fields[0], []).append((limit or fields[1], fields[2]))
+        resets = fields[3] if len(fields) > 3 else ""
+        families.setdefault(fields[0], []).append((limit or fields[1], fields[2], resets))
+    return families
+
+
+def _family_exhausted(limits: list[tuple[str, str, str]]) -> bool:
+    """True if any of a family's limits has 0% left: every call against it fails."""
+    return any(_percent_remaining(value) == 0.0 for _, value, _ in limits)
+
+
+def _parse_usage_rows(stdout: str) -> list[tuple[str, bool, str]]:
+    """agy's `/usage` table as status rows, one per model family.
+
+    Keeps the remaining share and drops the reset timestamps — they are the least
+    useful column in a one-line status row. A family whose remaining share has hit
+    0% is reported NOT ok: every call against it will fail until the window resets,
+    which is exactly the kind of thing this tool exists to surface before the user
+    spends a call finding out.
+    """
     rows: list[tuple[str, bool, str]] = []
-    for family, limits in families.items():
-        detail = ", ".join(f"{name} {value}" for name, value in limits)
-        exhausted = any(_percent_remaining(v) == 0.0 for _, v in limits)
-        rows.append((f"quota: {family}", not exhausted, detail))
+    for family, limits in _parse_usage_table(stdout).items():
+        detail = ", ".join(f"{name} {value}" for name, value, _ in limits)
+        rows.append((f"quota: {family}", not _family_exhausted(limits), detail))
     return rows
 
 
@@ -1892,6 +2100,179 @@ def _quota_status_rows() -> list[tuple[str, bool, str]]:
     out = _read_agy_usage()
     rows = _parse_usage_rows(out) if out else []
     return rows or [("quota", True, 'unreadable (`agy -p "/usage"` failed)')]
+
+
+# --- quota failures (issue #7) ---------------------------------------------------
+# agy's quota is per model FAMILY ("Gemini Models", "Gemini 4 Argon", "Claude and
+# GPT models"), but a run that hits one fails with a bare non-zero exit, e.g.
+# "Individual quota reached, resets in ~75h". A calling agent reads that as "agy is
+# out of quota" and moves the job onto its own, scarcer tokens, when another family
+# would have answered for free. So a failed run whose output reads like a quota or
+# rate-limit error gets agy's own `/usage` table appended, with the family the call
+# drew on and a model to retry with.
+#
+# The markers are matched only against a FAILED run's stderr/stdout, never an
+# answer. A false positive costs one free `/usage` read and an extra paragraph.
+_QUOTA_FAILURE_MARKERS = (
+    "quota",
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "ratelimit",
+    "resource_exhausted",
+    "resource exhausted",
+    "too many requests",
+)
+
+# A swarm whose workers all hit the same exhausted family fails N times within a
+# second or two. One `/usage` read serves them all.
+_QUOTA_REPORT_TTL_S = 30.0
+_QUOTA_REPORT_CACHE: Optional[tuple[float, Optional[str]]] = None
+_QUOTA_REPORT_LOCK = threading.Lock()
+
+
+def _looks_like_quota_failure(text: Optional[str]) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _QUOTA_FAILURE_MARKERS)
+
+
+def _recent_agy_usage() -> Optional[str]:
+    """`/usage` stdout for a failure report, shared for _QUOTA_REPORT_TTL_S.
+
+    None where agy has no free `/usage` (see supports_print_usage) or the read
+    failed. Unlike antigravity_status, which always reads fresh, a failure report
+    only needs the table to be seconds old.
+    """
+    global _QUOTA_REPORT_CACHE
+    if not supports_print_usage():
+        return None
+    with _QUOTA_REPORT_LOCK:
+        cached = _QUOTA_REPORT_CACHE
+        if cached is not None and time.monotonic() - cached[0] < _QUOTA_REPORT_TTL_S:
+            return cached[1]
+        out = _read_agy_usage()
+        _QUOTA_REPORT_CACHE = (time.monotonic(), out)
+        return out
+
+
+def _family_prefixes(family: str) -> list[str]:
+    """Model-slug prefixes a `/usage` family covers.
+
+    "Gemini 4 Argon" -> ["gemini-4-argon"], "Gemini Models" -> ["gemini"],
+    "Claude and GPT models" -> ["claude", "gpt"].
+    """
+    words = [w for w in family.lower().split() if w not in ("model", "models")]
+    return ["-".join(part.split()) for part in " ".join(words).split(" and ") if part.strip()]
+
+
+def _model_usage_family(model: Optional[str], families) -> Optional[str]:
+    """The `/usage` family a model draws on, or None if no family name matches.
+
+    Takes a slug (gemini-4-argon-high) or the human label agy's settings.json holds
+    (Gemini 4 Argon (High)). The longest matching family prefix wins, so a model
+    with its own family ("Gemini 4 Argon") is not counted under the generic
+    "Gemini Models".
+    """
+    if not model:
+        return None
+    slug = "-".join(re.sub(r"\s*\([^)]*\)\s*$", "", model).lower().split())
+    best: Optional[str] = None
+    best_len = 0
+    for family in families:
+        for prefix in _family_prefixes(family):
+            if (slug == prefix or slug.startswith(prefix + "-")) and len(prefix) > best_len:
+                best, best_len = family, len(prefix)
+    return best
+
+
+def _agy_settings_model() -> Optional[str]:
+    """The `"model"` label in agy's settings.json (what a call without `model` runs
+    on, swarm workers included: they copy this file), or None if unset/unreadable."""
+    try:
+        data = json.loads((AGY_DATA / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    model = data.get("model") if isinstance(data, dict) else None
+    return model if isinstance(model, str) and model.strip() else None
+
+
+def _quota_failure_note(model: Optional[str]) -> str:
+    """Which model families are out of quota and which still have some, for a
+    failed run that hit a quota or rate limit. Spends no quota (see _read_agy_usage).
+    """
+    table = _parse_usage_table(_recent_agy_usage() or "")
+    if not table:
+        return (
+            "agy reported a quota or rate limit, but its `/usage` table could not be "
+            "read to say which model family is out. Quota is counted per model family, "
+            "so another family may still answer: retry with a different `model` (agy's "
+            "`models` list has them), or run antigravity_status."
+        )
+    lines = ["agy reported a quota or rate limit. Quota left per model family (agy `/usage`):"]
+    for family, limits in table.items():
+        parts = []
+        for name, value, resets in limits:
+            empty = _percent_remaining(value) == 0.0
+            parts.append(f"{name} {value}" + (f" (resets {resets})" if empty and resets else ""))
+        mark = "  <- OUT OF QUOTA" if _family_exhausted(limits) else ""
+        lines.append(f"  {family}: {', '.join(parts)}{mark}")
+
+    exhausted = [f for f, limits in table.items() if _family_exhausted(limits)]
+    if not exhausted:
+        lines.append(
+            "No family is at 0%, so this is most likely a short-term rate limit: wait a "
+            "little and retry."
+        )
+        return "\n".join(lines)
+
+    if model:
+        ran_on = f"This call ran on {model}"
+        family = _model_usage_family(model, table)
+    else:
+        default = _agy_settings_model()
+        ran_on = "This call ran on agy's default model" + (f" ({default})" if default else "")
+        family = _model_usage_family(default, table)
+    if family in exhausted:
+        lines.append(f"{ran_on}, which draws on {family}, and that family is out of quota.")
+    elif family:
+        lines.append(
+            f"{ran_on}, which draws on {family}, and that family still shows quota, so "
+            "this may be a short-term rate limit: wait a little and retry."
+        )
+        return "\n".join(lines)
+    else:
+        lines.append(f"{ran_on}.")
+
+    models = list_agy_models()
+    options = []
+    for fam, limits in table.items():
+        if _family_exhausted(limits):
+            continue
+        # Match against every family, so gemini-4-argon-* counts as Gemini 4 Argon
+        # and is never offered as a "Gemini Models" example.
+        example = next((m for m in models if _model_usage_family(m, table) == fam), None)
+        options.append(f'{fam} (e.g. model="{example}")' if example else fam)
+    if options:
+        lines.append(
+            "agy itself is working: retry with a model from a family that still has "
+            f"quota: {'; '.join(options)}."
+        )
+    else:
+        lines.append("Every model family is out of quota until the reset times above.")
+    return "\n".join(lines)
+
+
+def _with_quota_note(message: str, output: Optional[str], model: Optional[str] = None) -> str:
+    """`message`, plus _quota_failure_note when `output` (a FAILED agy run's stderr
+    and stdout) reads like a quota or rate-limit error. The note is a courtesy: if
+    building it fails, the original message goes out unchanged."""
+    if not _looks_like_quota_failure(output):
+        return message
+    try:
+        return f"{message}\n\n{_quota_failure_note(model)}"
+    except Exception:  # noqa: BLE001 — never let the courtesy mask the real error
+        log.debug("quota note failed", exc_info=True)
+        return message
 
 
 def _parse_json_result(stdout: str) -> Optional[dict]:
@@ -2037,6 +2418,7 @@ def list_agy_models() -> list[str]:
         try:
             proc = proc_tree.run_captured(
                 [AGY_BIN, "models"],
+                starts_agent=False,  # a probe, not an agent run
                 stdin=subprocess.DEVNULL,
                 **_TEXT,
                 timeout=20,
@@ -2064,13 +2446,41 @@ def validate_model(model: Optional[str]) -> Optional[str]:
     loud rejection listing the new names, not a silent run on the wrong model. The
     same exactness is what turns a model agy RETIRES into a loud failure rather
     than a silent fallback — 1.1.25 dropped the whole gemini-3.5-flash family.
+
+    A BASE name, a listed slug minus its effort suffix (gemini-4-argon for
+    gemini-4-argon-high), is accepted too: `agy models` lists only suffixed slugs,
+    but agy runs the base name on the family's default effort. Verified live on
+    1.5.1 for the Gemini families only: `--model gemini-4-argon` and `--model
+    gemini-3.8-flash` both answered. Any other listed family's base name
+    (gpt-oss-120b, ...) is passed to agy the same way without having been tried.
+    Still exact per name, so a base name agy no longer lists any slug for fails.
     """
     if not model:
         return model
     known = list_agy_models()
-    if known and model not in known:
-        raise ValueError(f"unknown agy model {model!r}; expected one of: {', '.join(known)}")
+    bases = _agy_base_names(known)
+    if known and model not in known and model not in bases:
+        hint = f" (or a base name without the effort: {', '.join(bases)})" if bases else ""
+        raise ValueError(f"unknown agy model {model!r}; expected one of: {', '.join(known)}{hint}")
     return model
+
+
+# The effort suffixes agy puts on its model slugs (gemini-4-argon-high). Matched
+# whole, so a base name never swallows part of a version number.
+_AGY_EFFORT_SUFFIXES = ("minimal", "low", "medium", "high", "xhigh", "max")
+_AGY_EFFORT_RE = re.compile(r"^(.+)-(?:" + "|".join(_AGY_EFFORT_SUFFIXES) + r")$")
+
+
+def _agy_base_names(slugs: list[str]) -> list[str]:
+    """The effort-less base names of `slugs`, in first-seen order: gemini-4-argon
+    for gemini-4-argon-{low,medium,high}. A slug without an effort suffix
+    (gpt-oss-120b, if agy listed it bare) yields nothing: it is its own name."""
+    bases: list[str] = []
+    for slug in slugs:
+        m = _AGY_EFFORT_RE.match(slug)
+        if m and m.group(1) not in bases:
+            bases.append(m.group(1))
+    return bases
 
 
 def _agy_base_args(timeout_s: int, plan: bool = False) -> list[str]:
@@ -2162,6 +2572,39 @@ def _print_timeout_error(timeout_s: int, partial: str = "") -> RuntimeError:
         f"agy hit its {timeout_s}s timeout before finishing, so it returned only part "
         "of an answer. Raise timeout_s, or split the task into smaller ones."
     )
+    partial = (partial or "").strip()
+    if partial:
+        msg += f"\n\n--- partial answer, cut off mid-turn ({len(partial)} chars) ---\n{partial}"
+    return RuntimeError(msg)
+
+
+# agy 1.4.11 added `finished_reason` to the `--output-format json` result and the
+# stream-json result event. It is present only when the turn ended early, and the
+# changelog names three values: print_timeout, interrupted and error. Like the
+# 1.2.0 timeout, such a run can still exit 0 with status SUCCESS (verified on
+# 1.4.12 for print_timeout), so the field, not the status, says the answer is cut.
+_FINISHED_EARLY_REASONS = ("print_timeout", "interrupted", "error")
+
+
+def _finished_reason(result: Optional[dict]) -> Optional[str]:
+    """agy's `finished_reason` from a json/stream-json result, or None if absent."""
+    reason = (result or {}).get("finished_reason")
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _finished_early_error(
+    reason: str, partial: str, stderr: Optional[str], model: Optional[str]
+) -> RuntimeError:
+    """The error for a turn agy says it ended early for a reason other than a timeout.
+
+    Same contract as _print_timeout_error: a cut-short answer is an error, and the
+    partial text rides along, labelled as cut, instead of being passed off as whole.
+    """
+    msg = f"agy ended the turn early (finished_reason={reason}), so its answer is incomplete."
+    stderr = (stderr or "").strip()
+    if stderr:
+        msg += f"\nstderr: {stderr[-1000:]}"
+    msg = _with_quota_note(msg, stderr, model)
     partial = (partial or "").strip()
     if partial:
         msg += f"\n\n--- partial answer, cut off mid-turn ({len(partial)} chars) ---\n{partial}"
@@ -2276,11 +2719,30 @@ def _run_agy(
             **_spawn_kwargs(),  # keep agy's TTY writes out of the host terminal
         )
         log.debug("agy exited %s in %.1fs", proc.returncode, time.time() - start)
+        stdout_answer = (proc.stdout or "").strip()
+        result = _parse_json_result(stdout_answer) if use_json else None
+        reason = _finished_reason(result)
+        if _print_timed_out(proc.stderr) or reason == "print_timeout":
+            # Checked BEFORE the exit code: agy 1.5.0 made an expired --print-timeout
+            # exit 3 (status ERROR, finished_reason print_timeout, the partial text
+            # in `response`), where 1.2.0-1.4.x exited 0. Both are the same cut turn
+            # and get the same error — see _print_timeout_error. Still record the
+            # conversation: it is this workspace's newest thread, and leaving the
+            # previous id in place would point a later continue at an older one.
+            conv_id = (result or {}).get("conversation_id") or ""
+            if conv_id and pin:
+                _record_conv_id(workspace, conv_id)
+            partial = (result.get("response") or "") if result is not None else stdout_answer
+            raise _print_timeout_error(timeout_s, partial)
         if proc.returncode != 0:
             raise RuntimeError(
-                f"agy exited {proc.returncode}\n"
-                f"stderr: {proc.stderr[-1000:]}\n"
-                f"stdout: {proc.stdout[-500:]}"
+                _with_quota_note(
+                    f"agy exited {proc.returncode}\n"
+                    f"stderr: {proc.stderr[-1000:]}\n"
+                    f"stdout: {proc.stdout[-500:]}",
+                    f"{proc.stderr}\n{proc.stdout[-2000:]}",
+                    model,
+                )
             )
 
         # agy 1.0.15 fixed the print-mode stdout bug (Windows): `agy -p` now writes
@@ -2291,9 +2753,9 @@ def _run_agy(
         # SQLite formats). Older agy — and, per the 1.0.15 changelog, non-Windows
         # platforms — still leave stdout empty; those fall through to the
         # transcript/.db scrape below, unchanged. A --sandbox run likewise writes
-        # nothing to stdout, so it too uses the fallback.
-        stdout_answer = (proc.stdout or "").strip()
-
+        # nothing to stdout, so it too uses the fallback. (stdout_answer is read above,
+        # before the exit check.)
+        #
         # agy 1.1.8+: stdout is a structured result object rather than bare text
         # (we asked for it via --output-format json). Parsing it beats trusting the
         # text layout — `response` is a contractual field, and `conversation_id`
@@ -2301,17 +2763,20 @@ def _run_agy(
         # from shared state. Record that id so a later continue pins to this thread.
         # A None result means agy gave us plain text after all (an agy that ignored
         # the flag), which falls through to the text path below unchanged.
-        result = _parse_json_result(stdout_answer) if use_json else None
-        if _print_timed_out(proc.stderr):
-            # Exit 0 and status SUCCESS, but the turn was cut — see _print_timeout_error.
-            # Still record the conversation: it is this workspace's newest thread, and
-            # leaving the previous id in place would point a later continue at an
-            # older one.
+        if reason in _FINISHED_EARLY_REASONS:
+            # Exit 0 and status SUCCESS, but the turn was cut (interrupted or error;
+            # a timeout was handled above) — see _FINISHED_EARLY_REASONS. Record the
+            # conversation for the same reason as above.
             conv_id = (result or {}).get("conversation_id") or ""
             if conv_id and pin:
                 _record_conv_id(workspace, conv_id)
             partial = (result.get("response") or "") if result is not None else stdout_answer
-            raise _print_timeout_error(timeout_s, partial)
+            raise _finished_early_error(reason, partial, proc.stderr, model)
+        if reason:
+            # A value newer than this bridge. The field is documented as present only
+            # on an early end, but its vocabulary may grow; like an unexpected status,
+            # note it rather than discard what may be a whole answer.
+            log.warning("agy reported finished_reason=%s; returning its answer", reason)
         if schema is not None and result is None:
             raise RuntimeError(
                 "agy produced no structured result object for a --json-schema run "
@@ -2494,7 +2959,15 @@ def _run_agy_watched(
         # transcript: stream-json describes only the CURRENT run, and prior turns are
         # history. It is cosmetic and already degrades to [] when unreadable.
         history = _read_agy_history(pinned_conv) if (continue_conv and pinned_conv) else []
-        rid = _watch_begin(title, start, timeout_s, prompt=prompt, history=history)
+        # A call without `model` runs on settings.json's model (see _agy_settings_model).
+        rid = _watch_begin(
+            title,
+            start,
+            timeout_s,
+            prompt=prompt,
+            history=history,
+            model=model or _agy_settings_model() or "",
+        )
         stream = _StreamWatch(rid, start) if use_stream else None
         feed = None if use_stream else _WatchFeed(pinned_conv, start, rid)
         try:
@@ -2534,17 +3007,33 @@ def _run_agy_watched(
             feed.pump()  # drain transcript entries flushed right before exit
         out_t.join(timeout=5)  # let the last events land before reading the result
         err_t.join(timeout=5)
-        if proc.returncode != 0:
-            _watch_finish(rid, "error", f"(agy exited {proc.returncode})", time.time() - start)
-            stderr_tail = "".join(err_chunks)[-1000:]
-            raise RuntimeError(f"agy exited {proc.returncode}\nstderr: {stderr_tail}")
-        if _print_timed_out("".join(err_chunks)):
-            # Same cut-short-but-exit-0 turn as _run_agy — see _print_timeout_error.
+        reason = _finished_reason(stream.result if stream is not None else None)
+        if _print_timed_out("".join(err_chunks)) or reason == "print_timeout":
+            # Before the exit code, as in _run_agy: agy 1.5.0+ exits 3 here, older 0.
             if stream is not None and stream.conv_id:
                 _record_conv_id(workspace, stream.conv_id)
             partial = ((stream.result or {}).get("response") or "") if stream is not None else ""
             _watch_finish(rid, "error", "(timed out)", time.time() - start)
             raise _print_timeout_error(timeout_s, partial)
+        if proc.returncode != 0:
+            _watch_finish(rid, "error", f"(agy exited {proc.returncode})", time.time() - start)
+            stderr_text = "".join(err_chunks)
+            raise RuntimeError(
+                _with_quota_note(
+                    f"agy exited {proc.returncode}\nstderr: {stderr_text[-1000:]}",
+                    f"{stderr_text}\n{''.join(_out)[-2000:]}",
+                    model,
+                )
+            )
+        if reason in _FINISHED_EARLY_REASONS:
+            # Same cut-short-but-exit-0 turn as _run_agy (a timeout was handled above).
+            if stream is not None and stream.conv_id:
+                _record_conv_id(workspace, stream.conv_id)
+            partial = ((stream.result or {}).get("response") or "") if stream is not None else ""
+            _watch_finish(rid, "error", f"(ended early: {reason})", time.time() - start)
+            raise _finished_early_error(reason, partial, "".join(err_chunks), model)
+        if reason:
+            log.warning("agy reported finished_reason=%s; returning its answer", reason)
 
         # The stream's terminal `result` event is the answer, and its conversation_id
         # is agy naming its own conversation — record it so a later continue pins to
@@ -2642,7 +3131,9 @@ def _run_agy_image_watched(
         title = display_prompt.strip().splitlines()[0] if display_prompt.strip() else "image"
         if len(title) > 200:
             title = title[:200].rsplit(" ", 1)[0] + "…"
-        rid = _watch_begin(title, start, timeout_s, prompt=display_prompt)
+        rid = _watch_begin(
+            title, start, timeout_s, prompt=display_prompt, model=_agy_settings_model() or ""
+        )
         stream = _StreamWatch(rid, start) if use_stream else None
         feed = None if use_stream else _WatchFeed(None, start, rid)
         try:
@@ -2706,6 +3197,10 @@ def _run_agy_image_watched(
             final_path, fmt, size = _finalize_image(target, agy_text, start)
         except RuntimeError as fin_err:
             _watch_finish(rid, "error", f"no image produced: {fin_err}", time.time() - start)
+            if _print_timed_out("".join(_err)):
+                # No image AND agy cut the turn at --print-timeout (exit 3 on 1.5.0+,
+                # 0 before): the timeout is the cause, not a missing file.
+                raise RuntimeError(f"{_print_timeout_error(timeout_s)} ({fin_err})") from fin_err
             if agy_error is not None:
                 raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
             raise
@@ -2767,6 +3262,7 @@ import swarm_tools  # noqa: E402
 import codex_tools  # noqa: E402
 import copilot_tools  # noqa: E402
 import cursor_tools  # noqa: E402
+import claude_tools  # noqa: E402
 import grok_tools  # noqa: E402
 import kimi_tools  # noqa: E402
 import opencode_tools  # noqa: E402
@@ -2779,6 +3275,7 @@ _TOOL_MODULES = (
     codex_tools,
     copilot_tools,
     cursor_tools,
+    claude_tools,
     grok_tools,
     kimi_tools,
     opencode_tools,
@@ -2815,12 +3312,31 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def main() -> None:
+# The first argument that makes `agent-intern` a terminal command instead of the
+# stdio server. Anything else, including no argument at all, runs the server exactly
+# as before: an MCP host config that passes an unrelated argument must keep working.
+_CLI_COMMANDS = frozenset({"doctor", "rules", "help", "--help", "-h"})
+_VERSION_FLAGS = frozenset({"--version", "-V"})
+
+
+def main(argv: Optional[list[str]] = None) -> None:
     """Console entry point (also `python server.py`).
 
     Exposed as the `agent-intern` script so the bridge can be launched with
     `uvx agent-intern` (isolated, always-latest) instead of a hardcoded path.
+
+    `agent-intern --version` and `agent-intern doctor` are terminal commands; they
+    print to stdout and exit. Only they write there: the server path below never
+    does, since stdout is its JSON-RPC channel.
     """
+    args = sys.argv[1:] if argv is None else argv
+    if args and args[0] in _VERSION_FLAGS:
+        print(f"agent-intern {__version__}")
+        return
+    if args and args[0] in _CLI_COMMANDS:
+        import doctor  # only the terminal commands pay for it
+
+        sys.exit(doctor.cli(args))
     _configure_logging()
     _startup_checks()
     mcp.run()

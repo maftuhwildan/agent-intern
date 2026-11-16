@@ -7,23 +7,25 @@ How the bridge drives each CLI, how it reads the answer back, how `*_continue` f
 ## The backends at a glance
 
 The bridge normalizes every CLI into the same shape, but they differ where it matters. Pick per task.
-The five verified backends first; the [three experimental ones](#experimental-backends) follow.
+The six verified backends first; the [three experimental ones](#experimental-backends) follow.
+[Claude Code](#claude-bridge) is the one that is **for the other hosts**: inside Claude Code its tools
+are hidden.
 
-| | 🛰️ **Antigravity** (`agy`) | 🤖 **Codex** (`codex exec`) | 🐙 **Copilot** (`copilot -p`) | ✳️ **Cursor** (`cursor-agent -p`) | 🧩 **opencode** (`opencode run`) |
-|---|---|---|---|---|---|
-| **Model** | Selectable via `model` (agy's `--model`); Gemini 3.8 Flash (High) default (see [Model & auth](#model--auth)) | Selectable via `model` (codex's `-m`) | Selectable via `model` (`--model`) | Selectable via `model` (`--model`), validated against `cursor-agent models` | Selectable via `model` (`-m`, `"provider/model"`), validated against `opencode models`; **free `opencode/*` ids need no account** |
-| **Best at** | Fast, cheap tool-calling; quick answers | Heavier reasoning; real code/repo work | Agentic coding; real code/repo work | Agentic coding; wide model menu (GPT/Claude/Grok/Composer) | Working with **no subscription**; any provider you do have. Free models are slow (**152–260 s** measured) |
-| **Image generation** | ✅ `antigravity_image` (+ `antigravity_image_swarm`) | ❌ no image model | ❌ no image model | ❌ no image model | ❌ no image model |
-| **Sandbox** | ❌ no real boundary (`--sandbox` blocks only shell); ⚠️ opt-in `plan=True` blocks writes/shell, agent-enforced | ✅ real, enforced: `read-only` / `workspace-write` / `danger-full-access` | ⚠️ best-effort: tool/path permissions (`read-only` denies write/shell) — **not** an OS sandbox | ⚠️ agent-enforced: mode/force (`read-only` = `--mode ask`, write/shell tools unavailable) — **not** an OS sandbox | ⚠️ agent-enforced: an `OPENCODE_PERMISSION` policy that wins over the agent's own rules; **identical on every OS**; a would-be prompt is auto-rejected — **not** an OS sandbox |
-| **How the answer is read** | `--output-format json` on agy 1.1.8+ (`stream-json` when watching); else stdout, else scraped from `transcript.jsonl` | Written to a file via `-o/--output-last-message` | stdout (`-s` silent mode) | stdout (`--output-format text`) | `--format json` NDJSON events (the same stream watch mode renders) |
-| **Continue mechanism** | Pins the workspace's conversation id (`--conversation`) | Resumes the session id (`codex exec resume <id>`) | Resumes a self-set session UUID (`--session-id`) | Mints a chat id (`create-chat`) and resumes it (`--resume <id>`) | Pins the session id every event carries and resumes it (`-s <id>`); falls back to opencode's per-directory `-c` |
-| **Auth** | OS credential store (AI Pro session) | `codex login` (ChatGPT account or API key) | OS credential store (`copilot login`) or a GitHub token env | `cursor-agent login` (OS credential store) or `CURSOR_API_KEY` | **None required** — free `opencode/*` models answer with 0 credentials; `opencode auth login` (or a provider env var) unlocks the rest |
-| **In a swarm** | Runs with an isolated `HOME` to avoid state races | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation |
+| | 🛰️ **Antigravity** (`agy`) | 🤖 **Codex** (`codex exec`) | 🐙 **Copilot** (`copilot -p`) | ✳️ **Cursor** (`cursor-agent -p`) | 🧩 **opencode** (`opencode run`) | 🅲 **Claude Code** (`claude -p`) |
+|---|---|---|---|---|---|---|
+| **Model** | Selectable via `model` (agy's `--model`); Gemini 4 Argon (Medium) default (see [Model & auth](#model--auth)) | Selectable via `model` (codex's `-m`) | Selectable via `model` (`--model`) | Selectable via `model` (`--model`), validated against `cursor-agent models` | Selectable via `model` (`-m`, `"provider/model"`), validated against `opencode models`; **free `opencode/*` ids need no account** | Selectable via `model` (`--model`): an alias (`haiku`, `sonnet`, `opus`, `fable`) or a full id; not checked up front, because `claude` has no free model list |
+| **Best at** | Fast, cheap tool-calling; quick answers | Heavier reasoning; real code/repo work | Agentic coding; real code/repo work | Agentic coding; wide model menu (GPT/Claude/Grok/Composer) | Working with **no subscription**; any provider you do have. Free models answered in **2.5–6.5 s** on 1.19.5 (they took 152–260 s a month earlier, so the speed moves) | Reasoning and code work on your **Claude plan**, from a host that is not Claude Code |
+| **Image generation** | ✅ `antigravity_image` (+ `antigravity_image_swarm`) | ❌ no image model | ❌ no image model | ❌ no image model | ❌ no image model | ❌ no image model |
+| **Sandbox** | ❌ no real boundary (`--sandbox` blocks only shell); ⚠️ opt-in `plan=True` blocks writes/shell, agent-enforced | ✅ real, enforced: `read-only` / `workspace-write` / `danger-full-access` | ⚠️ best-effort: tool/path permissions (`read-only` denies write/shell) — **not** an OS sandbox | ⚠️ agent-enforced: mode/force (`read-only` = `--mode ask`, write/shell tools unavailable) — **not** an OS sandbox | ⚠️ agent-enforced: a permission policy that wins over the agent's own rules (1.x: `OPENCODE_PERMISSION`; 2.x: `OPENCODE_CONFIG_CONTENT` with `--standalone`, see [2.x](#opencode-2)); **identical on every OS**; a would-be prompt is auto-rejected — **not** an OS sandbox | ⚠️ agent-enforced by Claude Code itself: `read-only` has no Write, Edit or Bash and no web; `workspace-write` confines file edits to the workspace and runs **no shell** — **not** an OS boundary |
+| **How the answer is read** | `--output-format json` on agy 1.1.8+ (`stream-json` when watching); else stdout, else scraped from `transcript.jsonl` | Written to a file via `-o/--output-last-message` | stdout (`-s` silent mode) | stdout (`--output-format text`) | `--format json` NDJSON events (the same stream watch mode renders) | `--output-format stream-json` events, the prompt on stdin; the last `result` event carries the answer |
+| **Continue mechanism** | Pins the workspace's conversation id (`--conversation`) | Resumes the session id (`codex exec resume <id>`) | Resumes a self-set session UUID (`--session-id`) | Mints a chat id (`create-chat`) and resumes it (`--resume <id>`) | Pins the session id every event carries and resumes it (`-s <id>`); falls back to opencode's per-directory `-c` | Names its own session (`--session-id <uuid>`) and resumes it (`--resume <id>`); falls back to `--continue` after a restart |
+| **Auth** | OS credential store (AI Pro session) | `codex login` (ChatGPT account or API key) | OS credential store (`copilot login`) or a GitHub token env | `cursor-agent login` (OS credential store) or `CURSOR_API_KEY` | **None required** — free `opencode/*` models answer with 0 credentials; `opencode auth login` (or a provider env var) unlocks the rest | `claude auth login` (your plan) or `ANTHROPIC_API_KEY` |
+| **In a swarm** | Runs with an isolated `HOME` to avoid state races | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot (`backend: "claude"`) — needs no isolation |
 
 ## How it works
 
-All eight backends run **headless** and one-shot per call; the bridge's job is to get a clean answer
-out of each and hand it to Claude Code as a plain string.
+All nine backends run **headless** and one-shot per call; the bridge's job is to get a clean answer
+out of each and hand it to the host (Claude Code in the diagram) as a plain string.
 
 ```mermaid
 flowchart LR
@@ -36,6 +38,7 @@ flowchart LR
     B -- "grok_* (experimental)" --> H[grok -p]
     B -- "kimi_* (experimental)" --> I[kimi -p]
     B -- "muse_* (experimental)" --> J[muse exec]
+    B -- "claude_* (other hosts only)" --> K[claude -p]
     C -- "json / stream-json (1.1.8+)<br/>else stdout or transcript.jsonl / .db" --> B
     D -- "output-last-message file" --> B
     E -- "stdout (-s silent)" --> B
@@ -44,6 +47,7 @@ flowchart LR
     H -- "--output-format json" --> B
     I -- "stdout (--output-format text)" --> B
     J -- "--json events (run_terminal)" --> B
+    K -- "stream-json result event" --> B
     B -- "plain text" --> A
 ```
 
@@ -96,7 +100,7 @@ itself md5 of the workspace path).
 
 | | 🛰️ **Antigravity** | 🤖 **Codex** | 🐙 **Copilot** | ✳️ **Cursor** | 🧩 **opencode** |
 |---|---|---|---|---|---|
-| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"claude-sonnet-5-5-high"`, `"gemini-3.8-flash-low"`); omit to use the `"model"` field in agy's `settings.json` (**`gemini-3.8-flash-high`** by default, still on 1.3.5). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Flash High is speed-optimized for cheap tool-calling; pick a bigger model for heavier work. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `claude-4-sonnet-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. | **Selectable** via the `model` argument (`-m`, always `"provider/model"` — e.g. `opencode/nemotron-3.5-lightning-free`, `anthropic/claude-sonnet-4-6`), validated against `opencode models` (a typo is rejected up front, which matters because opencode's own error for an unknown id is an unhelpful "Unexpected server error"). Omit for opencode's configured default. The `opencode/*-free` ids need **no account**, and are slow. |
+| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"gemini-4-argon-high"`, `"gemini-4-hydrogen-high"`, `"gemini-3.8-flash-low"`); omit to use the `"model"` field in agy's `settings.json`, or agy's own default when none is set (**Gemini 4 Argon (Medium)** on 1.4.12 and again on 1.5.1, checked in a clean home directory with `/model`; it was `gemini-3.8-flash-high` from 1.1.25 to 1.3.5). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Quota is per model family; a call that fails on quota names each family's quota and a model from one that still has some. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `claude-4-sonnet-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. | **Selectable** via the `model` argument (`-m`, always `"provider/model"` — e.g. `opencode/nemotron-3.5-lightning-free`, `anthropic/claude-sonnet-4-6`), validated against `opencode models` (a typo is rejected up front, which matters because opencode's own error for an unknown id is an unhelpful "Unexpected server error"). Omit for opencode's configured default. The `opencode/*-free` ids need **no account**, and are slow. |
 | **Auth** | Piggybacks whatever credential store `agy` uses on your OS (Windows Credential Manager, macOS Keychain, libsecret on Linux — the bridge never touches it directly). Log in once; every call silent-auths on the **same AI Pro quota** you already pay for. | Uses your existing **Codex login** — ChatGPT account or API key. Run `codex login` once; verify with `codex_status`. | Uses your existing **Copilot login** — run `copilot` then `/login` once (OS credential store), or set `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`. Verify with `copilot_status`. | Uses your existing **Cursor login** — run `cursor-agent login` once (OS credential store), or set `CURSOR_API_KEY`. Verify with `cursor_status`. | **None required.** The free `opencode/*` models answer with `0 credentials`. For anything better, `opencode auth login` (stored in `~/.local/share/opencode/auth.json`) or a provider env var such as `ANTHROPIC_API_KEY`. Verify with `opencode_status`. |
 
 <a id="codex-bridge"></a>
@@ -120,6 +124,23 @@ fixed its stdout). Three things make Codex worth reaching for over Antigravity:
 
 **Auth.** Uses your existing Codex login (ChatGPT account or API key). Run `codex login` once; check
 with `codex_status`. No new keys for the bridge to manage.
+
+**On Windows, `workspace-write` can silently run as `read-only`.** Checked on codex 0.166.0 by reading
+the header `codex exec` prints before it calls the model (so no quota was spent): with
+`-s workspace-write` and nothing else, the header says `sandbox: read-only`, in a plain directory, in a
+git repository and with the directory marked trusted. Adding any `-c windows.sandbox=mxc`,
+`unelevated` or `elevated` makes it say `workspace-write [workdir, /tmp, $TMPDIR]`, and
+`codex doctor` reports `sandbox backend disabled` on this machine. The sandbox itself works: with
+`codex sandbox -c windows.sandbox=mxc` (or `unelevated`) `--permission-profile :workspace`, a command
+wrote a file inside the workspace and got *Access denied* writing outside it. `mxc` (0.162.0 and
+later) needs no administrator setup; `elevated` does, and hung here, most likely on an elevation
+prompt ([Windows sandbox docs](https://learn.chatgpt.com/docs/windows/windows-sandbox)). What a real
+model run does with a write was **not** checked, because the Codex quota ran out (it resets
+2026-11-22). The older Windows caveat ([status](status.md#status--caveats): every command refused on
+0.149.1 to 0.162.1) was seen on this same machine, whose `config.toml` has no `[windows]` sandbox
+setting today, so a missing Windows sandbox is a **hypothesis** for its cause, not a finding. The
+test that settles it: `codex exec -s read-only -c windows.sandbox=unelevated` on a prompt that must
+read a file.
 
 > [!WARNING]
 > `codex exec` runs the model as an **autonomous agent with no interactive approval gate**. The
@@ -229,7 +250,8 @@ stdout-native like Codex/Copilot/Cursor: `opencode run --format json "<prompt>"`
 non-interactively and writes **NDJSON events** to stdout. Three things make it worth a slot of its own:
 
 - **It answers with no account.** `opencode models` lists free hosted ids under opencode's own
-  provider (`opencode/nemotron-3.5-lightning-free`, `opencode/mimo-v2.5-free`, …) that work with
+  provider (`opencode/nemotron-3.5-lightning-free`, `opencode/beam-free`, `opencode/mimo-v2.6-flash-free`, …;
+  the list moves, so run `opencode models`) that work with
   **`0 credentials`** configured. Every claim in this section was verified on **opencode 1.18.29 /
   Windows** against those models — this is the first backend here whose *answer path* could be proven
   without a paid plan. Add your own key (`opencode auth login`, or `ANTHROPIC_API_KEY` /
@@ -298,16 +320,22 @@ the round-trip.
   `subprocess.run(timeout=…)`, whose Windows branch re-reads that very pipe) and kills the tree with
   `taskkill /T`.
 
-**Slowness is normal.** The free models are queue-scheduled: measured **152 s**, **214 s** and **260 s**
-for one-word answers. That is why `timeout_s` defaults to **300** here rather than the usual 180 —
-don't mistake a slow free model for a hang, and prefer a configured paid model for real work. One
+**Speed varies, so keep the long timeout.** The free models are queue-scheduled and their speed has
+moved a lot. In September and early October 2026 a one-word answer took **152 s**, **214 s** and
+**260 s**. On 2026-11-05 the same kind of call took **2.5–6.5 s** on opencode 1.19.5 (the default,
+`nemotron-3.5-lightning-free`, `mimo-v2.6-flash-free`, `deepseek-v4.1-flash-free`,
+`glm-5.3-flash-free` and `beam-free`, one call each, read-only, through the bridge) and **1.4–14 s**
+on 2.2.5. The default `timeout_s` stays at **300** rather than the usual 180, because the slow days
+may come back. A free tier can also refuse a call outright: after about 25 quick calls one came back
+with `provider.free-limit` ("Free usage limit reached…", HTTP 429), and later calls answered again.
+Prefer a configured paid model for real work. One
 observed corollary: a weak free model asked under `read-only` to do something that *needs* a write
 can spend the **whole** timeout retrying tools it will never be given (it wrote nothing, which is the
 point — it just took the full budget to give up). Both fenced modes therefore also deny opencode's
 `doom_loop` retry guard, whose default would already be rejected in headless mode, so that a user
 config which allowed it can't turn a fenced run into an unbounded loop.
 
-**Auth.** None needed for the free models. `opencode auth login` (also spelled `opencode providers`)
+**Auth.** None needed for the free models. `opencode auth login` (on 1.x also spelled `opencode providers`)
 stores credentials in `~/.local/share/opencode/auth.json` — the XDG layout, on Windows too. Set
 **`OPENCODE_BIN`** if `opencode` isn't reliably on `PATH`.
 
@@ -316,6 +344,175 @@ stores credentials in `~/.local/share/opencode/auth.json` — the XDG layout, on
 > OS boundary — a tool call is refused by opencode, not by the kernel — but unlike grok's OS sandbox it
 > behaves the same on Windows, macOS and Linux. For a hard boundary, use `codex_ask`. Only use it with
 > **trusted prompts on trusted content**.
+
+<a id="opencode-2"></a>
+
+### opencode 2.x — what changed under the bridge
+
+opencode 2 (`npm i -g @opencode/cli`) keeps the `opencode` command, and its installer replaces a 1.x
+install ([migration guide](https://opencode.ai/v2/docs/migrate-v1/)). Everything below was **observed
+live on 2.2.5 / Windows** with free models, except the lines marked *docs*. Five things differ from
+1.x; the first three stop the 1.x bridge from working or fencing at all:
+
+| | 1.x (verified on 1.18.29 – 1.19.5) | 2.x (observed on 2.2.5) |
+|---|---|---|
+| Working directory | `run --dir <workspace>` | **no `--dir`**: `Unrecognized flag: --dir`, exit 1. The directory is the process's working directory. |
+| Where the policy goes | env `OPENCODE_PERMISSION` | env **`OPENCODE_CONFIG_CONTENT`** holding `{"permissions": [...]}`. `OPENCODE_PERMISSION` is not read: a shell write went through under a read-only policy set that way. |
+| Whose process applies it | the `run` process | **only with `--standalone`.** By default a run connects to a shared background service (`opencode service status`, a local port) that was started earlier and ignores the run's env: the same read-only policy let a shell write through in default mode. |
+| Rule shape | `{"bash": "ask", "edit": "deny", ...}` | an ordered array of `{"action", "resource", "effect"}`; the **last** matching rule wins *(docs)*. `bash` became `shell`, `task` became `subagent`, and `edit` covers `write` and `patch`. |
+| Credentials check | `opencode providers list` | that subcommand is gone; `opencode auth list` prints "No authenticated integrations" when nothing is configured (no count line). |
+
+Unchanged: `--format json` and its `step_start` / `text` / `tool_use` / `step_finish` / `error` events
+with a `sessionID` (`ses_…`), `-s <id>` and `-c` (both checked with `--standalone`, and `-s` through the
+service too), `-m provider/model`, and `--` before a prompt that starts with a dash. `--version` prints
+`opencode v2.2.5`, with a leading `v`. The `opencode.cmd` shim runs the native
+`node_modules\@opencode\cli\bin\opencode.exe` directly, which the bridge's shim resolver already
+finds. `opencode models` still lists one `provider/model` per line, now with ten `opencode/*` ids
+(`beam-free`, `big-pickle`, `crouton-alpha-free`, `deepseek-v4.1-flash-free`, `flint-40b-free`,
+`glm-5.3-flash-free`, `mimo-v2.6-flash-free`, `nemotron-3.5-lightning-free`,
+`nemotron-3.5-super-vl-free`, `pulse-alpha-free`; whether `big-pickle` is free was not checked).
+
+**A policy that fences, and one that writes.** Passed as `OPENCODE_CONFIG_CONTENT` with `--standalone`:
+
+```json
+{"permissions": [
+  {"action": "shell",              "resource": "*", "effect": "ask"},
+  {"action": "edit",               "resource": "*", "effect": "deny"},
+  {"action": "subagent",           "resource": "*", "effect": "deny"},
+  {"action": "external_directory", "resource": "*", "effect": "deny"},
+  {"action": "webfetch",           "resource": "*", "effect": "deny"},
+  {"action": "websearch",          "resource": "*", "effect": "deny"},
+  {"action": "execute",            "resource": "*", "effect": "deny"}
+]}
+```
+
+- **Read-only** is that list. A shell write and an edit-tool write were both refused and no file was
+  written. A would-be prompt is still auto-rejected in a headless run, and a fenced call now reads
+  `This non-interactive run cannot ask the user for permission, so the request was rejected.` in the
+  tool part's `error`, with `permission requested: shell (...); auto-rejecting` on stderr. The 1.x
+  wording, "rejected permission to use this specific tool call", is gone. `execute` is 2.x's Code
+  Mode tool: without the deny, a model that could not use `shell` called it a dozen times and still
+  wrote nothing, but there is no reason to leave it open. The `.env` read denials of 1.x carry over
+  as `{"action": "read", "resource": "*.env", "effect": "deny"}` (and `*.env.*`, with
+  `*.env.example` allowed): through the bridge the read tool was refused `.env` and `.env.local` and
+  allowed `.env.example` and an ordinary file, in both modes.
+- **`shell` can be `deny` as well as `ask`.** The free tier's 1.x demand that a `bash` tool be present
+  ("OpenCode's free tier can only be used from within OpenCode") did not appear on 2.2.5: with `shell`
+  denied the free model still answered. `ask` stays what was verified.
+- **Workspace-write** is `shell` allow plus `edit` allow: the shell and the edit tool each wrote a file
+  in the workspace. **The shell is not confined to it.** `external_directory` denied did not stop a
+  shell redirect into the parent directory, in a plain directory and in a git repository. A shell
+  command is raw text to the policy (the docs call directory inference from it best effort), so a
+  shell write cannot be confined, and a shell can `cat` a `.env` file the read rules refuse.
+  **The edit tool can be confined, and with these rules it was.** Rules: `edit` `*` allow, then `edit`
+  `../*` deny, `edit` `?:/*` deny, `edit` `/*` deny, and `external_directory` `*` deny. Checked live on
+  2.2.5 on 2026-11-09 with a free model and the shell denied for the test, so the `write` tool did
+  every write: `sub/dir/nested.txt` inside the workspace was written, and `../rel_outside.txt`, an
+  absolute `C:/…` path and a backslashed `C:\…` path outside were all refused, each with
+  `Permission denied: external_directory` before the `edit` rules were reached. The `edit` denies are
+  a second layer. With the shell allowed, as workspace-write really runs, the `write` tool wrote a
+  file in a subdirectory. A `.env` inside the workspace can still be written: those rules cover
+  reads only.
+  **Why the first attempt was wrong.** An earlier allow rule named the absolute workspace path
+  (`C:/<workspace>/*`) and an earlier note said it let a write inside through. It could not have: for
+  a path inside the run's directory (or inside the project's worktree) opencode matches the rule
+  against a **location-relative path with forward slashes**, such as `sub/dir/nested.txt` or, for a
+  sibling in the worktree, `../other/file.txt` (`packages/core/src/file-access.ts` lines 94 to 105 at
+  tag v2.2.5), and against the **absolute** path only for a path outside both (line 115). The shell
+  was allowed in that run and the file was most likely the shell's. The same goes for an earlier note
+  that the edit tool wrote outside the workspace under an `external_directory` deny: the shell was
+  allowed then too, and with it denied the deny held. Patterns are whole-value, `*` matches any run of
+  characters including `/`, `?` matches one character, both sides have `\` turned into `/`, and
+  matching ignores case on Windows (`packages/core/src/util/wildcard.ts` lines 3 to 14); the last
+  matching rule wins (`packages/core/src/permission.ts` lines 86 to 95).
+  So 2.x workspace-write is: the edit tool confined to the workspace, the shell not. Treat it as
+  agent-enforced and best effort, like Copilot's.
+- **The old object form still works as a deprecated key**: `OPENCODE_CONFIG_CONTENT` with
+  `{"permission": {"bash": "ask", ...}}` and `--standalone` fenced a shell write. The schema marks
+  `permission` deprecated, so the array is the one to build on.
+
+**What the bridge does about all this.** On 2.x every run passes `--standalone` and no `--dir`, and
+the policy is written into `OPENCODE_CONFIG_CONTENT`, replacing any `permission` or `permissions`
+keys already in the caller's inline config (other keys are kept). The `opencode` major version is read
+once with `opencode --version`; a major other than 1 or 2, or a version it cannot read, is refused
+rather than run unfenced. Its own diagnostics (`models`, `auth list`) put `--standalone` **before**
+the subcommand: on 2.2.5 each of them starts the shared background service otherwise, and
+`--standalone` after the subcommand did not prevent it (`--version` starts nothing).
+
+Not tried on 2.x: `--auto`, `--agent`, `--fork`, a configured provider, and macOS and Linux. (The free
+tier answered `provider.free-limit` to every model for about 13 hours after the first round of
+probes, with `retryAfterMs` 46152000, which is why some checks ran on 2026-11-09.) The shared
+background service keeps running after a default-mode call; `opencode service stop` ends it.
+
+**opencode as a host for this server** (2.2.5, free model, `--standalone`). The server loads and all
+29 tools are available, but opencode 2 does not give the model one tool per MCP tool: it reaches them
+through its Code Mode `execute` tool as JavaScript, `await tools["agent-intern"].opencode_status()`.
+`opencode_status` ran without any approval flag. One run asked for the `OFFER IT` server instructions
+and the model said it had none. A permission rule that denies `execute` removes Code Mode and with it
+these tools. To register it, `opencode mcp add agent-intern -- uvx agent-intern` writes an
+`opencode.json` in the current directory (`--global` writes `~/.config/opencode/opencode.jsonc`):
+`{"mcp": {"servers": {"agent-intern": {"type": "local", "command": ["uvx", "agent-intern"]}}}}`. The
+`uvx` form was written from the venv-python run, not executed. `opencode mcp list` printed "No MCP
+servers configured" with the server loaded, so it is no check.
+
+<a id="claude-bridge"></a>
+
+## 🅲 Claude Code bridge — for the hosts that are not Claude Code
+
+Anthropic's [Claude Code](https://claude.com/claude-code) (`claude`) as a sub-agent, on your own Claude
+plan or API key. It exists for **other hosts**: an Antigravity, Codex, Copilot, Cursor or opencode
+session can hand work to Claude. Inside Claude Code the three tools (`claude_ask`, `claude_continue`,
+`claude_status`) are **hidden**, because delegating to yourself spends the same quota twice: the server
+sees `CLAUDECODE=1`, which Claude Code sets for its children, and leaves them out unless
+`AGENT_INTERN_BACKENDS` names `claude` (so a host sees 32 tools and Claude Code 29). `agent_swarm`
+takes `backend: "claude"` (aliases `claude-code`, `anthropic`).
+
+- **How it runs.** `claude -p --output-format stream-json --verbose --disable-slash-commands
+  --strict-mcp-config` plus the sandbox flags below, with the **prompt on stdin**: no Windows
+  command-line limit, no prompt starting with `-` read as a flag, nothing for `cmd.exe` to re-parse. The
+  last stream line is a `result` event with the answer, the session id and any permission denials, for
+  watched and unwatched runs alike. `--disable-slash-commands` stops a prompt that starts with `/name`
+  from running that command instead of reaching the model (the hazard agy 1.1.9 had).
+  `--strict-mcp-config` with no config means the child loads **no MCP servers**: it would otherwise load
+  yours, agent-intern included, and be able to call `claude_ask` again.
+- **Not `--bare`.** It skips hooks, plugins and `CLAUDE.md`, but it also ignores OAuth logins and takes
+  only `ANTHROPIC_API_KEY`, which would lock out everyone on a Claude subscription.
+- **Version.** Needs claude **2.1.259 or newer** (`--permission-prompts`); verified on **2.1.319 /
+  Windows**. `CLAUDE_BIN` overrides the executable; an npm `claude.cmd` shim is resolved to its target
+  like the other bridges.
+- **Continue.** A fresh ask names its own session with `--session-id <uuid>`, so the pin is known before
+  the run and parallel swarm workers cannot race for it. `claude_continue` resumes it with `--resume`
+  (found by id from any directory); after a server restart it falls back to `--continue`, the newest
+  session in the workspace.
+- **Auth.** `claude auth login` (your plan) or `ANTHROPIC_API_KEY`. `claude_status` shows the version,
+  how you are signed in (method, plan, login expiry; never your e-mail or organisation) and the
+  `backends` row. There is **no usage or limits row**: no free way to read it exists, and a run that hits
+  the plan's limit says so in its error.
+- **Model.** `model` is an alias (`haiku`, `sonnet`, `opus`, `fable`) or a full id. `claude` has no free
+  model list, so an unknown one is left for `claude` to reject.
+
+**Sandbox: enforced by Claude Code itself, and not an OS boundary for file edits.** Claude Code's own OS
+sandbox covers shell commands only, and it does not run on native Windows, so the bridge does not use it.
+
+- **`read-only`** (default): no Write, Edit or Bash, no web, user and project settings ignored (a
+  `permissions.allow` rule cannot loosen it), file tools confined to the working directory, and anything
+  that would prompt is denied. Verified on claude 2.1.319 / Windows.
+- **`workspace-write`**: file edits are auto-approved and **confined to the workspace** (a write inside
+  went through, one outside was refused), and there is **no shell**, so it cannot run tests or builds.
+- **`danger-full-access`**: `--dangerously-skip-permissions`, no restriction, your own settings apply.
+  **Not verified live.**
+
+**Nesting.** Claude Code exports its session to child processes: `CLAUDECODE`, the session id, a
+cross-session messaging socket and token. A child `claude` started from a server that Claude Code
+launched would inherit them and could act on the host session's channel, so the bridge scrubs them
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ATTENDED`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_PID`,
+`AI_AGENT`) and sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` so `-p` does not wait on background work.
+Auth and provider settings (`ANTHROPIC_*`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_*`) are kept. A
+nesting guard now covers **every** backend: each child server gets `AGENT_INTERN_DEPTH` one higher than
+its parent, and a server at depth 2 starts no agent and says so, so a backend that loads agent-intern can
+delegate one level further and no deeper (`*_status` shows a `nesting` row when it is reached;
+[details](security.md#nesting-limit)).
 
 <a id="grok-bridge"></a>
 
@@ -449,7 +646,7 @@ answer, and what real tool calls look like in the stream, remain unverified.
 
 ## 🧪 The three experimental backends — and how you can help
 
-**Grok Build**, **Kimi Code** and **Muse Code** are wired in exactly like the other five, with one
+**Grok Build**, **Kimi Code** and **Muse Code** are wired in exactly like the other six, with one
 honest difference: **no real model has ever answered through them.** I don't have a SuperGrok / X
 Premium+ subscription, a Kimi plan or a Muse plan, so I cannot prove they answer. Muse goes furthest —
 its offline echo provider let the entire pipeline be exercised (see [Muse Code bridge](#muse-bridge)). They ship anyway because a bridge nobody

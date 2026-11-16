@@ -5,21 +5,22 @@
 ## FAQ
 
 <details>
-<summary><b>Is this against Google's / OpenAI's / GitHub's / Cursor's Terms of Service?</b></summary>
+<summary><b>Is this against Google's / OpenAI's / GitHub's / Cursor's / Anthropic's Terms of Service?</b></summary>
 
-It runs the **official `agy`, `codex`, `copilot`, and `cursor-agent` CLIs under your own logins** — no
-private APIs, no token theft, no quota abuse. It just bridges what the CLIs already do. That said, your
-AI Pro / Antigravity, OpenAI / Codex, GitHub Copilot, and Cursor ToS apply, and you're responsible for
-staying within them.
+It runs the **official `agy`, `codex`, `copilot`, `cursor-agent`, `opencode` and `claude` CLIs under
+your own logins** (and the experimental `grok`, `kimi` and `muse`) — no private APIs, no token theft, no quota
+abuse. It just bridges what the CLIs already do. That said, the terms of each provider you use apply
+(Google AI Pro / Antigravity, OpenAI / Codex, GitHub Copilot, Cursor, Anthropic / Claude Code,
+opencode and the model provider behind it), and you're responsible for staying within them.
 </details>
 
 <details>
-<summary><b>Do I need all eight CLIs?</b></summary>
+<summary><b>Do I need all nine CLIs?</b></summary>
 
 No. Each backend is independent — install only the CLI(s) you want. The tools for a missing backend
 report "not found" via their `*_status` tool (`antigravity_status` / `codex_status` /
-`copilot_status` / `cursor_status` / `opencode_status` / `grok_status` / `kimi_status` /
-`muse_status`) and never
+`copilot_status` / `cursor_status` / `opencode_status` / `claude_status` / `grok_status` /
+`kimi_status` / `muse_status`) and never
 crash the server. If you hold no subscriptions at all, opencode is the one that still answers.
 </details>
 
@@ -40,7 +41,7 @@ proactive, put it where Claude Code treats it as an instruction. Add this to you
 ```markdown
 ## Delegating to sub-agents
 
-The `intern` MCP server bridges Antigravity/Gemini, Codex, Copilot and Cursor as sub-agents
+The `intern` MCP server bridges Antigravity/Gemini, Codex, Copilot, Cursor and opencode as sub-agents
 running on my own subscriptions. Before starting bulk mechanical work (a rename across many
 files, boilerplate, a first-pass port), or anything that splits into independent parallel
 subtasks, propose delegating it in one line and wait for my answer — e.g. "this is 6
@@ -53,7 +54,12 @@ file, the opposite sentence.
 </details>
 
 <details>
-<summary><b>When should I use Antigravity vs Codex vs Copilot vs Cursor vs Grok vs Kimi?</b></summary>
+<summary><b>Which backend should I use — and which one do I start with?</b></summary>
+
+**Starting out?** Take whichever subscription you already pay for: Google AI Pro → Antigravity, a
+ChatGPT plan → Codex, GitHub Copilot → Copilot, Cursor → Cursor. **Nothing at all?** Install opencode;
+its free models need no account. Run the backend's `*_status` tool
+first: it spends no quota and tells you what's missing. Then, per job:
 
 Use **Antigravity** for fast, cheap tool-calling, quick answers, and **image generation** (it's the
 only backend with an image model) — and it now lets you **pick the model** too (agy's `--model`). Use
@@ -62,15 +68,23 @@ only backend with an image model) — and it now lets you **pick the model** too
 second coding opinion alongside Codex — noting its sandbox is **best-effort**, not enforced. Use
 **Cursor** for agentic coding on a Cursor plan, or when you want the **widest model menu** —
 GPT, Claude, Grok, and Composer, all via `model` — noting its sandbox is **agent-enforced**, like
-Copilot's.
+Copilot's. Use **opencode** when you have no subscription, when you want a model family none of the
+others cover, or to spare a paid quota — its free models answer with zero
+credentials, and its sandbox behaves the same on every OS. Use **Claude Code** (`claude_ask`) when
+your host *isn't* Claude Code and you want Claude's judgment on your own Claude plan: inside Claude
+Code it is hidden, since delegating to yourself spends the same quota twice. Its `workspace-write`
+confines file edits to the workspace and runs no shell, so it can't run tests or builds, and no mode
+is an OS boundary for edits.
 
-**Grok** and **Kimi** are [experimental and unverified](backends.md#experimental-backends) — reach for them to
-help verify them, or if they're the subscription you actually have. Grok is the more capable of the
-two here: real OS sandbox (Linux/macOS), watch mode, and swarm support. Kimi has no sandbox and no
-swarm/watch yet.
+**Grok**, **Kimi** and **Muse** are [experimental and unverified](backends.md#experimental-backends) —
+reach for them to help verify them, or if they're the subscription you actually have. Grok is the more
+capable of the first two here: real OS sandbox (Linux/macOS), watch mode, and swarm support. Kimi has
+no sandbox and no swarm/watch yet. Muse's whole pipeline is verified through its offline echo
+provider, but no real model has answered yet.
 
-All of them let you choose a `model` (except Kimi, which can't validate one); in a swarm
-you can mix five of the six. See [The backends at a glance](backends.md#the-backends-at-a-glance).
+All of them let you choose a `model` (Kimi and Muse pass it through without validating it); in a swarm
+you can mix eight of the nine (everything but Kimi). See
+[The backends at a glance](backends.md#the-backends-at-a-glance).
 </details>
 
 <details>
@@ -90,24 +104,33 @@ known-good `agy` version.
 <summary><b>Which model does Antigravity use — can I pick it?</b></summary>
 
 Yes. Pass `model` to `antigravity_ask`/`antigravity_continue` (or per task in `agent_swarm`) — it maps
-to agy's `--model`, taking any slug from `agy models` (e.g. `"claude-sonnet-5-5-high"`,
-`"gemini-3.8-flash-low"`). Omit it to use the `"model"` field in agy's `settings.json`, which
-defaults to **`gemini-3.8-flash-high`** — speed-optimized for cheap tool-calling.
+to agy's `--model`, taking any slug from `agy models` (e.g. `"gemini-4-argon-high"`,
+`"gemini-3.8-flash-low"`). Omit it to use the `"model"` field in agy's `settings.json`; with none
+set, agy 1.5.1 picks **Gemini 4 Argon (Medium)** (checked live in a clean home directory).
 
 **agy 1.1.5 renamed every model**, replacing the old human labels (`"Gemini 3.1 Pro (High)"`) with
 stable slugs (`gemini-3.1-pro-high`) — the old form is no longer accepted, so pass slugs. **The
-default has since moved three times**: 1.1.6 added the `gemini-3.6-flash` family and took it, the
+default has since moved four times**: 1.1.6 added the `gemini-3.6-flash` family and took it, the
 `gemini-3.7-flash` family arrived by 1.1.16 and took it in turn, and **1.1.25 added
 `gemini-3.8-flash` and moved the default onto that** (verified through the bridge: a call passing no
 `model` answers as Gemini 3.8 Flash). The same release also **dropped the whole `gemini-3.5-flash`
 family, which no changelog entry mentions** — a 3.5 slug from older docs is now rejected up front.
 **By 1.3.5 the catalog shrank again, and again no changelog entry says so:** the 3.7 and 3.6 Flash
 families, Gemini 3.1 Pro, `claude-sonnet-4-6` and `claude-opus-4-6-thinking` are gone, and Claude
-Opus 5.5 and Sonnet 5.5 arrived. The full list, re-checked live on 1.3.5:
-`gemini-3.8-flash-low|medium|high`, `claude-opus-5-5-low|medium|high`,
-`claude-sonnet-5-5-low|medium|high`, `gpt-oss-120b-medium`. Note the slug bakes in the
-reasoning effort, which is why each family appears once per level. The Claude and GPT models draw on
-a separate quota from the Gemini ones; `antigravity_status` shows both. agy self-updates in
+Opus 5.5 and Sonnet 5.5 arrived. **By 1.4.12 the `gemini-4-argon` family had arrived and agy's own
+default moved onto it.** **By 1.5.8 a `gemini-4-hydrogen` family (`low|medium|high|xhigh`) and
+`gemini-pro-orchestrator-g1-pro` ("Orchestrator (Argon)") had arrived.** Hydrogen answered through the
+bridge on an AI Pro login (`--model gemini-4-hydrogen` and `gemini-4-hydrogen-high`, and a two-worker
+swarm); the orchestrator slug is listed but was not called. The full list, read from `agy models` on 1.5.8:
+`gemini-4-argon-low|medium|high`, `gemini-4-hydrogen-low|medium|high|xhigh`,
+`gemini-pro-orchestrator-g1-pro`, `gemini-3.8-flash-low|medium|high`,
+`claude-opus-5-5-low|medium|high`, `claude-sonnet-5-5-low|medium|high`, `gpt-oss-120b-medium`.
+Note the slug bakes in the reasoning effort, which is why each family appears once per level.
+
+Quota is counted per family: Gemini 4 Argon, the other Gemini models, and the Claude and GPT models
+each have their own, and `antigravity_status` shows all three. When a call fails on quota, the error
+lists every family's quota and names a model from one that still has some, so retrying with that
+`model` usually works. agy self-updates in
 the background, so treat any list written down here — this one included — as a snapshot; `agy models`
 and `antigravity_status` are the live answer.
 
@@ -135,8 +158,9 @@ model — it's a coding agent.
 <summary><b>Does it cost extra money?</b></summary>
 
 No. It uses the **same quota you already pay for** — AI Pro for Antigravity, your Codex plan for
-Codex, your GitHub Copilot plan for Copilot, your Cursor plan for Cursor. The smoke test spends a
-negligible amount.
+Codex, your GitHub Copilot plan for Copilot, your Cursor plan for Cursor. opencode's free models cost
+nothing at all; if you point opencode at your own provider key, that provider bills you as usual. The
+smoke test spends a negligible amount.
 </details>
 
 <details>

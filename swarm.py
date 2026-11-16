@@ -164,6 +164,7 @@ def _probe_isolated_auth() -> Optional[bool]:
     try:
         proc = proc_tree.run_captured(
             [server.AGY_BIN, "--print-timeout", "20s", "-p", "/usage"],
+            starts_agent=False,  # a probe, not an agent run
             env=_env_for_home(home),
             stdin=subprocess.DEVNULL,
             **_TEXT,
@@ -371,6 +372,16 @@ def _repos(workspaces: list[str]) -> list[str]:
     return [_basename_any(w) for w in workspaces]
 
 
+def _watch_models(tasks: list[dict]) -> list[str]:
+    """The model each dashboard row shows: the task's own `model`, else for an
+    antigravity worker the settings.json model it will run on, else "" (no guess:
+    the other backends' defaults are not known to the bridge)."""
+    import server
+
+    default = server._agy_settings_model() or ""
+    return [t.get("model") or (default if t.get("backend") == "antigravity" else "") for t in tasks]
+
+
 # ----------------------------------------------------------------------------- text swarm
 def _run_text_worker_serialized(
     index, prompt, workspace, model, timeout_s, t0, plan=False
@@ -425,10 +436,17 @@ def _run_text_worker(index, prompt, workspace, model, timeout_s, plan=False) -> 
             timeout=timeout_s + 30,
             **server._spawn_kwargs(),
         )
-        if proc.returncode != 0:
-            raise RuntimeError(f"agy exited {proc.returncode}: {proc.stderr[-300:]}")
+        # The timeout first: agy 1.5.0+ exits 3 on it, 1.2.0-1.4.x exited 0.
         if server._print_timed_out(proc.stderr):
             return _print_timeout_result(index, timeout_s, proc.stdout, home, t0, workspace)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                server._with_quota_note(
+                    f"agy exited {proc.returncode}: {proc.stderr[-300:]}",
+                    f"{proc.stderr}\n{(proc.stdout or '')[-2000:]}",
+                    model,
+                )
+            )
         deadline = time.time() + 5.0
         while True:
             conv = _only_conv(home)
@@ -557,14 +575,22 @@ def _run_text_worker_watched(
         feed.pump()
         out_t.join(timeout=5)
         err_t.join(timeout=5)
-        if proc.returncode != 0:
-            raise RuntimeError(f"agy exited {proc.returncode}: {''.join(err_chunks)[-300:]}")
+        # The timeout first: agy 1.5.0+ exits 3 on it, 1.2.0-1.4.x exited 0.
         if server._print_timed_out("".join(err_chunks)):
             res = _print_timeout_result(
                 index, timeout_s, "".join(out_chunks), home, start, workspace
             )
             swarm_watch.worker_finish(index, "error", res.error or "", time.time() - start)
             return res
+        if proc.returncode != 0:
+            err_text = "".join(err_chunks)
+            raise RuntimeError(
+                server._with_quota_note(
+                    f"agy exited {proc.returncode}: {err_text[-300:]}",
+                    f"{err_text}\n{''.join(out_chunks)[-2000:]}",
+                    model,
+                )
+            )
         deadline = time.time() + 5.0
         while True:
             conv = _only_conv(home)
@@ -606,6 +632,23 @@ def _run_text_worker_watched(
 
 
 # ----------------------------------------------------------------------------- image swarm
+def _finalize_or_timeout(home, target, agy_text, start, stderr: str, timeout_s: int):
+    """_finalize_image_isolated, but a turn agy cut at --print-timeout that produced
+    no image reports the timeout, not "no image file found".
+
+    An image written before the cut is still returned: the file is checked first.
+    agy 1.5.0+ exits 3 on the timeout and 1.2.0-1.4.x exit 0; the stderr mark is the
+    same on both, so this does not look at the exit code."""
+    import server
+
+    try:
+        return _finalize_image_isolated(home, target, agy_text, start)
+    except RuntimeError as e:
+        if server._print_timed_out(stderr):
+            raise RuntimeError(f"{server._print_timeout_error(timeout_s)} ({e})") from e
+        raise
+
+
 def _finalize_image_isolated(home: Path, target: str, agy_text: Optional[str], start: float):
     """Locate the generated image (target / agy-reported path / isolated scratch),
     correct its extension to the real bytes, and return (path, fmt, size)."""
@@ -655,13 +698,20 @@ def _run_image_worker_serialized(
         os.makedirs(workspace, exist_ok=True)
         wrapped = server._wrap_image_prompt(prompt, target)
         agy_text: Optional[str] = None
+        agy_error: Optional[RuntimeError] = None
         try:
             agy_text = server._run_agy(wrapped, workspace, False, timeout_s, pin=False)
-        except RuntimeError:
+        except RuntimeError as e:
             # The image may exist even when the answer read failed; only report this
-            # if nothing was produced (same rule as server.antigravity_image).
-            pass
-        final_path, fmt, size = server._finalize_image(target, agy_text, start)
+            # if nothing was produced (same rule as server.antigravity_image), and
+            # then name it, so a timeout is not reported as a missing file.
+            agy_error = e
+        try:
+            final_path, fmt, size = server._finalize_image(target, agy_text, start)
+        except RuntimeError as fin_err:
+            if agy_error is not None:
+                raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
+            raise
         return WorkerResult(
             index,
             True,
@@ -709,12 +759,22 @@ def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResu
                     agy_text = _read_isolated_response(home, conv)
                 except RuntimeError:
                     pass
-        elif _looks_like_auth_failure((proc.stderr or "") + (proc.stdout or "")):
-            # Surface agy's sign-in failure as the error, so the handler below can
-            # recognize it. Otherwise this path swallows a non-zero exit and fails
-            # with "no image file produced", which hides the real cause.
-            raise RuntimeError(f"agy exited {proc.returncode}: {(proc.stderr or '')[-300:]}")
-        final_path, fmt, size = _finalize_image_isolated(home, target, agy_text, start)
+        else:
+            output = (proc.stderr or "") + (proc.stdout or "")
+            if _looks_like_auth_failure(output) or server._looks_like_quota_failure(output):
+                # Surface agy's sign-in or quota failure as the error, so the handler
+                # below can recognize the first and the caller sees which model
+                # family is out for the second. Otherwise this path swallows a
+                # non-zero exit and fails with "no image file produced", which hides
+                # the real cause.
+                raise RuntimeError(
+                    server._with_quota_note(
+                        f"agy exited {proc.returncode}: {(proc.stderr or '')[-300:]}", output
+                    )
+                )
+        final_path, fmt, size = _finalize_or_timeout(
+            home, target, agy_text, start, proc.stderr or "", timeout_s
+        )
         return WorkerResult(
             index,
             True,
@@ -806,11 +866,16 @@ def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> Wo
             except RuntimeError:
                 pass
         err_text = "".join(err_chunks)
-        if proc.returncode != 0 and _looks_like_auth_failure(err_text):
-            # See the non-watched twin: surface the sign-in failure instead of
-            # letting it become a misleading "no image file produced".
-            raise RuntimeError(f"agy exited {proc.returncode}: {err_text[-300:]}")
-        final_path, fmt, size = _finalize_image_isolated(home, target, agy_text, start)
+        if proc.returncode != 0 and (
+            _looks_like_auth_failure(err_text) or server._looks_like_quota_failure(err_text)
+        ):
+            # See the non-watched twin: surface the sign-in or quota failure instead
+            # of letting it become a misleading "no image file produced".
+            message = f"agy exited {proc.returncode}: {err_text[-300:]}"
+            raise RuntimeError(server._with_quota_note(message, err_text))
+        final_path, fmt, size = _finalize_or_timeout(
+            home, target, agy_text, start, err_text, timeout_s
+        )
         caption = f"Saved to {final_path}\nformat={fmt} · {size} bytes"
         swarm_watch.worker_finish(index, "done", caption, time.time() - start, image=final_path)
         return WorkerResult(
@@ -855,7 +920,14 @@ def swarm_image(
     if watch:
         import swarm_watch
 
-        swarm_watch.init(_labels(prompts), _repos(ws), time.time(), prompts, timeout_s)
+        swarm_watch.init(
+            _labels(prompts),
+            _repos(ws),
+            time.time(),
+            prompts,
+            timeout_s,
+            models=_watch_models([{"backend": "antigravity"}] * len(prompts)),
+        )
         swarm_watch.open_window(len(prompts))
     results: list[Optional[WorkerResult]] = [None] * len(prompts)
     with ThreadPoolExecutor(max_workers=max(1, max_concurrency)) as ex:
@@ -896,6 +968,9 @@ _BACKEND_ALIASES = {
     "github": "copilot",
     "gh": "copilot",
     "cursor": "cursor",
+    "claude": "claude",
+    "claude-code": "claude",
+    "anthropic": "claude",
     "grok": "grok",
     "grok-build": "grok",
     "xai": "grok",
@@ -908,7 +983,16 @@ _BACKEND_ALIASES = {
 }
 
 # Backends the swarm can dispatch to, in the order the error message lists them.
-_BACKEND_NAMES = ("antigravity", "codex", "copilot", "cursor", "grok", "opencode", "muse")
+_BACKEND_NAMES = (
+    "antigravity",
+    "codex",
+    "copilot",
+    "cursor",
+    "claude",
+    "grok",
+    "opencode",
+    "muse",
+)
 
 
 def _normalize_tasks(tasks) -> list[dict]:
@@ -964,6 +1048,12 @@ def _normalize_tasks(tasks) -> list[dict]:
             sandbox = t.get("sandbox") or cursor_bridge.DEFAULT_SANDBOX
             cursor_bridge.validate_sandbox(sandbox)  # fail fast on a bad policy
             model = cursor_bridge.validate_model(t.get("model") or None)  # fail fast on a typo
+        elif backend == "claude":
+            import claude_bridge
+
+            sandbox = t.get("sandbox") or claude_bridge.DEFAULT_SANDBOX
+            claude_bridge.validate_sandbox(sandbox)  # fail fast on a bad policy
+            model = claude_bridge.validate_model(t.get("model") or None)
         elif backend == "grok":
             import grok_bridge
 
@@ -1213,6 +1303,74 @@ def _run_cursor_worker_watched(index, prompt, workspace, sandbox, model, timeout
         )
 
 
+def _run_claude_worker(index, prompt, workspace, sandbox, model, timeout_s) -> WorkerResult:
+    import claude_bridge
+
+    start = time.time()
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        ans = claude_bridge.run_claude(
+            prompt, workspace, sandbox, model, False, timeout_s, pin=False
+        )
+        return WorkerResult(
+            index,
+            True,
+            answer=ans,
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="claude",
+        )
+    except Exception as e:  # noqa: BLE001 — error isolation: one worker must not sink the swarm
+        return WorkerResult(
+            index,
+            False,
+            error=str(e),
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="claude",
+        )
+
+
+def _run_claude_worker_watched(index, prompt, workspace, sandbox, model, timeout_s) -> WorkerResult:
+    import claude_bridge
+    import server
+    import swarm_watch
+
+    start = time.time()
+    swarm_watch.worker_update(index, status="working", started=start)
+
+    def on_event(ev: dict) -> None:
+        lines = server._claude_event_to_watch_lines(ev)
+        if lines:
+            t = round(time.time() - start, 1)
+            swarm_watch.worker_append(index, [{"kind": k, "text": x, "t": t} for k, x in lines])
+
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        ans = claude_bridge.run_claude_streaming(
+            prompt, workspace, sandbox, model, False, timeout_s, on_event, pin=False
+        )
+        swarm_watch.worker_finish(index, "done", ans, time.time() - start)
+        return WorkerResult(
+            index,
+            True,
+            answer=ans,
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="claude",
+        )
+    except Exception as e:  # noqa: BLE001
+        swarm_watch.worker_finish(index, "error", str(e), time.time() - start)
+        return WorkerResult(
+            index,
+            False,
+            error=str(e),
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="claude",
+        )
+
+
 def _run_grok_worker(index, prompt, workspace, sandbox, model, timeout_s) -> WorkerResult:
     # NOTE: no HOME/GROK_HOME isolation here, unlike the agy workers. Grok mints a
     # fresh session per headless run, so parallel runs don't collide (verified:
@@ -1289,12 +1447,11 @@ def _opencode_timeout(timeout_s: int) -> int:
     """The swarm's per-worker budget, raised to opencode's own default if lower.
 
     The swarm shares one `timeout_s` across every backend and defaults it to 180s,
-    which is right for codex/copilot/cursor and WRONG for opencode: its free hosted
-    models are queue-scheduled and were measured at 152-428s for one-word answers,
-    so roughly half of them would be killed mid-answer and reported as a broken
-    worker rather than a slow one. Raising (never lowering) to the same 300s the
-    opencode_* tools use keeps a mixed swarm honest; a paid model just finishes
-    early and never notices the larger budget.
+    and opencode's own is a 300s ceiling: its free tier answers in seconds today
+    (2.5-6.5 s on 1.19.5) but has been queue-scheduled to 152-428 s before (1.18.x),
+    when a 180s budget killed about half the workers mid-answer. Raising (never
+    lowering) to the same ceiling the opencode_* tools use keeps a mixed swarm
+    honest; a worker that finishes early never notices the larger budget.
     """
     import opencode_bridge
 
@@ -1478,6 +1635,7 @@ def swarm_agents(
             prompts,
             timeout_s,
             backends=backends,
+            models=_watch_models(norm),
         )
         swarm_watch.open_window(n)
 
@@ -1488,10 +1646,13 @@ def swarm_agents(
         if t["backend"] not in server.ENABLED_BACKENDS:
             # Fails in place like a backend that isn't installed, so a preset with
             # one member turned off still runs the rest.
-            error = (
-                f"backend {t['backend']!r} is turned off by AGENT_INTERN_BACKENDS"
-                f" (on: {', '.join(server.ENABLED_BACKENDS)})"
-            )
+            if t["backend"] == "claude" and server.CLAUDE_HIDDEN:
+                error = f"backend 'claude' is off: {server.CLAUDE_HIDDEN_NOTE}"
+            else:
+                error = (
+                    f"backend {t['backend']!r} is turned off by AGENT_INTERN_BACKENDS"
+                    f" (on: {', '.join(server.ENABLED_BACKENDS)})"
+                )
             if watch:
                 import swarm_watch
 
@@ -1505,6 +1666,9 @@ def swarm_agents(
             return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
         if t["backend"] == "cursor":
             fn = _run_cursor_worker_watched if watch else _run_cursor_worker
+            return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
+        if t["backend"] == "claude":
+            fn = _run_claude_worker_watched if watch else _run_claude_worker
             return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
         if t["backend"] == "grok":
             fn = _run_grok_worker_watched if watch else _run_grok_worker

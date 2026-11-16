@@ -22,6 +22,197 @@ summary.
   tool would have raised, or `status: running`. Finished results are kept 60 minutes; jobs live in
   memory, so a server restart loses the job but not the file.
 
+## [0.37.1] - 2026-11-13
+
+### Added
+
+- **The swarm window shows each member's model.** Every row carries a chip with the model the worker
+  runs on (its task's `model`; for an antigravity worker without one, agy's `settings.json` model;
+  empty for the other backends rather than a guess), and a member's detail window repeats it. The
+  image swarm shows agy's default model.
+
+### Changed
+
+- **The watch window's header reads better:** the backend name stays as the title line and the model
+  is a monospace chip beside it (and beside the repo chip), instead of one `Backend · model` text.
+
+## [0.37.0] - 2026-11-13
+
+### Changed
+
+- **Re-verified on agy 1.5.8 (from 1.5.3). No break; the model catalog grew.** `VERIFIED_AGY_VERSION` →
+  `(1, 5, 8)`. agy now lists a `gemini-4-hydrogen` family (`low|medium|high|xhigh`) and
+  `gemini-pro-orchestrator-g1-pro`. Hydrogen answered through the bridge (`--model gemini-4-hydrogen`,
+  `gemini-4-hydrogen-high`, and a two-worker swarm); the orchestrator slug was not called. Not
+  re-checked: an image, plan mode with a tool call, `schema`. Loaded fresh in Claude Code (29 tools)
+  and in agy (32 tools), each answered an ask. See
+  [status](docs/status.md).
+
+### Added
+
+- **The watch window names the model next to the backend** (`Antigravity · Gemini 3.8 Flash (High)`).
+  A call without `model` shows agy's `settings.json` model; a backend whose default isn't known
+  to the bridge (codex, copilot, ...) shows the backend alone rather than a guess. The swarm
+  window is unchanged.
+
+## [0.36.0] - 2026-11-09
+
+### Added
+
+- **A Claude Code backend: `claude_ask`, `claude_continue` and `claude_status`, for hosts other than
+  Claude Code.** An Antigravity, Codex, Copilot, Cursor or opencode session can now delegate to
+  Claude Code on your own Claude login (`claude auth login`) or an `ANTHROPIC_API_KEY`; `agent_swarm`
+  takes `backend: "claude"` too (aliases `claude-code` and `anthropic`). **Inside Claude Code the
+  tools are hidden automatically**, since the server sees `CLAUDECODE=1` and delegating to yourself
+  spends the same quota twice; name `claude` in `AGENT_INTERN_BACKENDS` to turn them on anyway, and
+  the status tools' `backends` row says which case you are in. That makes 32 tools, or 29 inside
+  Claude Code. `read-only` (the default) reads and searches files: no Write, Edit or Bash.
+  `workspace-write` confines file edits to the workspace and runs **no shell**, so it can't run
+  tests or builds. `danger-full-access` skips every permission check and is **not verified live**.
+  All three are enforced by Claude Code itself and none is an OS boundary for file edits. `model`
+  takes an alias (`haiku`, `sonnet`, `opus`, `fable`) or a full id. `CLAUDE_BIN` overrides the
+  binary; claude 2.1.259 or newer is needed. `claude_status` shows the version and how you're
+  signed in (method, plan, login expiry), never your e-mail or organisation. Verified live on
+  claude 2.1.319 / Windows: hidden in Claude Code (29 tools), present in the Antigravity CLI (32
+  tools, `claude_ask` answered; `claude_status` answered in Copilot CLI, Cursor CLI and opencode
+  too), the `read-only` and `workspace-write` behaviour above. Not in this
+  release: a usage or limits row (there is no free way to read it); a run that hits the plan's limit
+  says so in its error.
+- **`agent-intern rules` prints the routing guide.** It is byte for byte the server's MCP
+  instructions for the backends `AGENT_INTERN_BACKENDS` leaves on, as UTF-8, to paste into the rules
+  file of a host that doesn't show MCP instructions to its model (the agy CLI; Copilot without
+  `--allow-all-mcp-server-instructions`; opencode is unconfirmed). Run it as
+  `uvx agent-intern rules > AGENTS.md`: agy, Copilot CLI, Cursor CLI and opencode all read that
+  file (measured; home-level rules files weren't tested).
+- **A nesting limit across every backend.** Each agent agent-intern starts gets
+  `AGENT_INTERN_DEPTH` one higher, and a copy of agent-intern two agents deep refuses to start
+  another, with a clear message, so agents can't recurse without end. A backend that loads
+  agent-intern can delegate one level further, and no deeper.
+- **`agent-intern doctor` checks Claude Code** along with the other backends.
+
+### Changed
+
+- **The server's guidance now fits every host.** The MCP instructions shrank from 5,062 to 3,407
+  characters, so Claude Code (which cuts them at 4,096) no longer truncates them: the offer trigger,
+  the backend picker and the `workspace` rule come first and the security note last. Every tool
+  description now leads with when to use the tool and carries the `workspace` rule, and parameter
+  notes are held to 600 characters; the detail that moved out (the `schema`, `plan` and `model`
+  notes, the Windows codex caveat, the `agent_swarm` backend aliases and per-backend sandbox notes)
+  is in [docs/tools.md](docs/tools.md).
+- **Re-verified on agy 1.5.3. No break.** Ask, continue, an image, a two-worker swarm and the
+  timeout error ran through this release's code.
+
+## [0.35.0] - 2026-11-09
+
+### Added
+
+- **`agent-intern doctor` checks your setup from the terminal, with no MCP host.** It runs the same
+  checks as the `*_status` tools for every backend that `AGENT_INTERN_BACKENDS` leaves on, and
+  prints each backend as `ready`, `warning` or `unusable` with the next step to fix it. It spends
+  no quota, and does what `/agent-intern:doctor` does in any host (Antigravity included) or in a
+  plain terminal: `uvx agent-intern doctor`. `--verbose` shows every check and `--json` prints the
+  result as JSON. The exit code is 0 when at least one backend is usable, 1 when none is, and 2 on
+  a usage error. Paste its output into a bug report.
+- **`agent-intern --version` / `-V`** prints the bridge version.
+- **doctor masks more than your home directory.** E-mail addresses show as `<email>` and API keys
+  with a known prefix as `<key>`, on top of the home directory (`~`). Read its output before you
+  post it anyway.
+- **opencode 2.x is supported (`npm i -g @opencode/cli`).** The sandbox uses 2.x's permission rules
+  (an ordered rule list in `OPENCODE_CONFIG_CONTENT`) and a private `--standalone` server, so the
+  per-run fence isn't ignored by the shared background service. 1.x keeps working; any other major
+  version, or one the bridge can't read, is refused with a clear message instead of running
+  unfenced. **On 2.x, `workspace-write` keeps file edits inside the workspace** (verified: an edit
+  to a subdirectory was written; `../x` and absolute paths outside were refused), **but shell
+  commands are not confined**: they can write anywhere your user can and read `.env` files. The edit
+  tool can also write a `.env` file inside the workspace; only reading one is blocked.
+  `read-only` blocks edits, shell, subagents and web. The read tool is refused `.env` and
+  `.env.local` in both modes. Checked live on opencode 2.2.5 / Windows
+  with free models; not checked on 2.x: `--auto`, macOS/Linux and a configured provider key. `opencode_status`
+  reads the credentials row from `opencode auth list` on 2.x, and `agent-intern doctor` recommends
+  the 2.x package.
+- **codex: a `workspace-write` request that codex silently ran read-only now gets a warning.** On
+  Windows, codex drops `workspace-write` to read-only unless a Windows sandbox is configured
+  (`sandbox = "unelevated"`, `"elevated"` or `"mxc"` under `[windows]` in `~/.codex/config.toml`).
+  When the sandbox codex reports differs from the one requested, `codex_ask`, `codex_continue` (fresh
+  runs) and codex swarm workers append an `[agent-intern] WARNING` with that hint. `codex_status`
+  gains a `windows sandbox` row on Windows (`configured: <value>` or `not configured`; never a
+  failure). The bridge does not set the key itself. Checked on codex-cli 0.166.0 by what codex
+  reports; a real write under the setting is not yet checked.
+
+### Changed
+
+- **agy's `model` also takes a family name without the effort suffix.** `model="gemini-4-argon"`
+  runs the family at its default effort, so `gemini-4-argon-high` is no longer the only way to name
+  it. Verified live on agy 1.5.1 for `gemini-4-argon` and `gemini-3.8-flash`. A typo is still
+  rejected up front.
+- **Tool docstrings and docs use a Gemini model in agy examples** (`gemini-4-argon-high`) instead
+  of a Claude one.
+- **opencode 2.x: status and model checks no longer leave opencode's background service running.**
+  On 2.x, `opencode models` and `opencode auth list` start the shared service; the bridge now passes
+  the global `--standalone` before them.
+- **opencode: an upgrade is picked up without restarting the server.** One that changes the
+  installed version or moves the binary (`opencode-ai` → `@opencode/cli`) is noticed on the next
+  call. An explicit `OPENCODE_BIN` pointing at a path that no longer exists now gets a clear error.
+- **opencode: an `OPENCODE_CONFIG_CONTENT` that isn't plain JSON (JSONC, say) is replaced for fenced
+  runs**, with a warning in the server log.
+- **opencode: a run the sandbox fenced into silence now says so**, instead of a bare "no text"
+  error.
+- **opencode's free models are no longer described as slow.** On opencode 1.19.5 six free models
+  answered a short prompt in 2.5–6.5 s (the default one in 4.8 s), and 1.4–2.8 s on 2.x, so the README, FAQ,
+  tool reference and tool descriptions drop "slow" and "allow minutes". The 300 s default timeout
+  stays, now only a ceiling.
+- **CI also tests Python 3.14 and 3.15**, and the package metadata lists them.
+- **Docs only:** the README gains a "Works in" section (Claude Code, the Antigravity CLI, Copilot CLI, Cursor CLI and opencode), a demo
+  animation under Quick start, a "by hand vs. with agent-intern" table, a where-to-start line, a
+  card banner (`assets/card.svg`) and a refreshed social preview; the FAQ
+  now covers opencode and Muse in its backend, terms-of-service and cost answers and opens its
+  backend question with a start-here paragraph; the bug-report template asks for the backend, CLI
+  version and `agent-intern doctor` output instead of agy details only; the example custom preset
+  is now a proposal review panel; and the repository gains a `SECURITY.md` and a Code of Conduct
+  (Contributor Covenant 2.1).
+
+### Fixed
+
+- **agy 1.5 timeouts in image swarm workers and watched image runs are reported as timeouts**, not
+  as "no image file produced". A serialized image worker no longer hides agy's own error.
+- **codex: the sandbox-downgrade warning also works when codex prints no header.** The bridge reads
+  the session's rollout instead, and finds it by file name rather than by scanning every session.
+- **agy 1.5: a `--print-timeout` that exits 3 is reported as a timeout again, with the partial
+  answer.** agy 1.5.0 made an expired print timeout exit 3 (it exited 0 before). Ask, continue, watch
+  mode and Antigravity swarm workers now report it as a timeout and attach the partial answer.
+
+## [0.34.0] - 2026-11-02
+
+### Changed
+
+- **A quota failure now says which model family is out, and which still has quota
+  ([#7](https://github.com/SinanTufekci/agent-intern/issues/7)).** agy counts quota per model
+  family, but a call that hit a limit came back as a bare `agy exited 1 … Individual quota
+  reached`, which a calling agent read as "agy is out of quota". When agy's output reads like a
+  quota or rate-limit error, the error now carries agy's `/usage` table (free to read), the family
+  the call drew on, and a model from a family that still has quota, e.g.
+  `retry with … Gemini Models (e.g. model="gemini-3.8-flash-high")`. Covers ask and continue,
+  watched or not, and antigravity swarm workers. One `/usage` read serves a burst of failures.
+- **Re-verified on agy 1.4.12.** No break. The bridge also reads 1.4.11's `finished_reason`: a turn
+  agy reports as cut short (`print_timeout`, `interrupted` or `error`) is an error with the
+  partial answer attached, never returned as a whole answer. The new `gemini-4-argon` family is
+  documented; with nothing set in `settings.json`, agy now defaults to Gemini 4 Argon (Medium).
+
+### Fixed
+
+- **`antigravity_status` reported `newest transcript [!!]` and `PROBLEMS FOUND` while everything
+  worked ([#8](https://github.com/SinanTufekci/agent-intern/issues/8)).** It read only the newest
+  conversation, which is often empty (left by an agy self-update), still running, or a failed turn.
+  It now reports the newest conversation with a readable answer, says how many newer ones it
+  skipped, and fails only when none of the ten newest is readable and one of those is neither
+  empty nor still running.
+- **An antigravity image swarm worker that hit a quota limit reported "no image file produced".**
+  It now passes agy's error on, with the quota note above.
+- **`agent_swarm(watch=true)` wrote a line into the MCP protocol stream.** Opening or reusing the
+  swarm dashboard printed its URL to stdout, which is the JSON-RPC channel, so the host received a
+  line that was not JSON-RPC, carrying the dashboard's access token. It now goes to the debug log
+  on stderr (`AGY_BRIDGE_DEBUG`), without the token.
+
 ## [0.33.0] - 2026-10-14
 
 ### Added
@@ -1877,7 +2068,12 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.37.1...HEAD
+[0.37.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.37.0...v0.37.1
+[0.37.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.36.0...v0.37.0
+[0.36.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.35.0...v0.36.0
+[0.35.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.34.0...v0.35.0
+[0.34.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.32.1...v0.33.0
 [0.32.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.31.1...v0.32.0

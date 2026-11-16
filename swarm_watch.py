@@ -56,12 +56,14 @@ def init(
     prompts: Optional[list[str]] = None,
     timeout: float = 0.0,
     backends: Optional[list[str]] = None,
+    models: Optional[list[str]] = None,
 ) -> None:
     """Seed dashboard state. `labels` are the short, single-line row captions;
     `prompts` (optional) are the full untruncated prompts shown in each worker's
     detail window (falls back to the label when omitted). `timeout` is the
     per-worker timeout_s, used to draw each row's time progress bar. `backends`
-    (optional) is the per-worker backend name shown as a small row badge.
+    (optional) is the per-worker backend name shown as a small row badge, and
+    `models` (optional) the per-worker model shown as a chip on the row.
     """
     with _LOCK:
         _STATE["started"] = start
@@ -73,6 +75,7 @@ def init(
                 "prompt": prompts[i] if prompts and i < len(prompts) else labels[i],
                 "repo": repos[i] if i < len(repos) else "",
                 "backend": backends[i] if backends and i < len(backends) else "",
+                "model": (models[i] if models and i < len(models) else "") or "",
                 "status": "queued",
                 "elapsed": 0.0,
                 "events": [],
@@ -213,6 +216,7 @@ def _launch(url: str, w: int, h: int, x: Optional[int] = None, y: Optional[int] 
         try:
             proc_tree.popen(
                 [exe, *flags],
+                starts_agent=False,  # a probe, not an agent run
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -242,11 +246,13 @@ def open_window(n_workers: int) -> None:
     # Fixed, narrow window, tall enough for five worker cards; more scroll.
     w, h, x, y = 440, 720, 40, 60
     _GEO.update(x=x, y=y, w=w, h=h)
-    url = f"http://127.0.0.1:{_port()}/?k={server._WATCH_TOKEN}"
+    port = _port()
+    url = f"http://127.0.0.1:{port}/?k={server._WATCH_TOKEN}"
+    # Log, never print: stdout is the MCP JSON-RPC stream. The token stays out of the log.
     if _dashboard_is_live() and not _env_truthy("AGY_WATCH_ALWAYS_NEW"):
-        print(f"[swarm-watch] reusing open dashboard: {url}", flush=True)
+        server.log.debug("swarm dashboard already open on port %d; reusing it", port)
         return
-    print(f"[swarm-watch] dashboard: {url}", flush=True)
+    server.log.debug("swarm dashboard on http://127.0.0.1:%d", port)
     _launch(url, w, h, x, y)
 
 
@@ -356,6 +362,7 @@ function build(ws){
   const st=el("div","stc");st.id="st"+w.index;
   r1.append(avatar(w.backend||"agy"),pr,st);
   const r2=el("div","c2");
+  if(w.model){const md=el("span","mdl",w.model);md.title="Model: "+w.model;r2.appendChild(md);}
   if(w.repo){const rp=el("span","repo",w.repo);rp.title=w.repo;r2.appendChild(rp);}
   const last=el("span","last");last.id="sub"+w.index;
   const cnt=el("span","cnt");cnt.id="cnt"+w.index;
@@ -480,7 +487,7 @@ async function tick(){
   const w=s.workers[IDX],back=w?bkName(w.backend):"agy";
   if(w){
    TITLE="Intern · "+(w.repo?w.repo+" · ":"")+(w.label||("Worker "+IDX));
-   setAgent(w.backend,w.repo);
+   setAgent(w.backend,w.repo,w.model);
   }
   if(s.started!==started){started=s.started;rebuild(w,back);}
   if(!w)setState("idle");

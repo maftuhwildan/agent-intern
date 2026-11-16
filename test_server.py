@@ -24,9 +24,11 @@ import pytest
 import codex_bridge
 import copilot_bridge
 import cursor_bridge
+import doctor
 import server
 import swarm
 import watch_server
+from conftest import hide_env
 
 # --------------------------------------------------------------------------
 # _normalize_workspace
@@ -549,15 +551,15 @@ def test_instructions_never_mention_a_backend_that_is_off():
     assert "- codex_* (" in text
     for word in ("antigravity", "Gemini", "EXPERIMENTAL", "copilot", "opencode", "kimi"):
         assert word not in text
-    assert "an external coding CLI — OpenAI Codex —" in text
-    assert "your tokens or gets a second model-family opinion." in text
+    assert text.startswith("This server runs OpenAI Codex as sub-agents on the USER'S OWN quota.")
+    assert "instead of your tokens and gets a second model-family opinion." in text
     assert "agent_swarm" in text  # codex can be a swarm worker
 
 
 def test_instructions_without_a_swarm_backend_drop_the_swarm_triggers():
     text = server._server_instructions(("kimi",))
     assert "agent_swarm" not in text and "preset_swarm" not in text
-    assert "experimental backends are unproven" in text
+    assert "Run an EXPERIMENTAL backend's *_status first" in text
 
 
 def test_every_tool_belongs_to_one_module_public_all():
@@ -614,7 +616,7 @@ def test_bridge_status_rows_add_the_backends_row_only_when_filtered(monkeypatch)
     monkeypatch.setattr(server, "ENABLED_BACKENDS", ("antigravity", "codex"))
     _, (label, ok, detail) = server._bridge_status_rows()
     assert label == "backends" and ok is True
-    assert detail.startswith("on: antigravity, codex; off: copilot, cursor, grok,")
+    assert detail.startswith("on: antigravity, codex; off: copilot, cursor, claude, grok,")
 
 
 def test_backends_status_flags_an_unknown_name(monkeypatch):
@@ -1200,8 +1202,13 @@ def test_validate_model_skips_when_list_unavailable(monkeypatch):
 # And a third time, on 1.3.5: gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro,
 # claude-sonnet-4-6 and claude-opus-4-6-thinking all gone, claude-sonnet-5-5 and
 # claude-opus-5-5 in, and no changelog entry from 1.2.11 on mentions any of it.
+#
+# A fourth, on 1.4.12: the gemini-4-argon family, which agy's own default moved onto.
 DOCUMENTED_AGY_MODELS = [
-    "gemini-3.8-flash-high",  # the default as of 1.1.25 (added the 3.8 family)
+    "gemini-4-argon-high",  # agy's own default family as of 1.4.12 (Medium, in a clean HOME)
+    "gemini-4-hydrogen-high",  # added by 1.5.8 (low|medium|high|xhigh); answers on an AI Pro login
+    "gemini-pro-orchestrator-g1-pro",  # added by 1.5.8, "Orchestrator (Argon)"; not called
+    "gemini-3.8-flash-high",  # the default from 1.1.25 to 1.3.5 (added the 3.8 family)
     "claude-sonnet-5-5-high",
     "claude-opus-5-5-high",
     "gpt-oss-120b-medium",
@@ -1215,7 +1222,7 @@ def _model_family(slug: str) -> str:
     to three entries. The docs deliberately name only the -high variant of each,
     which is why the coverage test below compares families rather than slugs.
     """
-    for effort in ("-low", "-medium", "-high"):
+    for effort in ("-low", "-medium", "-high", "-xhigh"):
         if slug.endswith(effort):
             return slug[: -len(effort)]
     return slug
@@ -1409,7 +1416,7 @@ def fake_agy(monkeypatch, brain_dir, last_conv_file):
 
     def fake_run(args, **kwargs):
         cap["args"] = args
-        cap["kwargs"] = kwargs
+        cap["kwargs"] = hide_env(kwargs)
         return subprocess.CompletedProcess(
             args, cap["returncode"], stdout=cap["stdout"], stderr=cap["stderr"]
         )
@@ -1825,6 +1832,96 @@ def test_run_agy_print_timeout_is_an_error_not_a_truncated_answer(fake_agy_json,
     assert server._recorded_conv_id("C:\\ws") == "cut"
 
 
+# agy 1.5.0+: the same expired --print-timeout exits 3 with status ERROR, the partial
+# text in `response`, and finished_reason print_timeout.
+_PRINT_TIMEOUT_STDERR_EXIT3 = (
+    "[agy] print timeout after 5s with turn in progress; returning partial output\n"
+    'AGY_ERROR: {"status":"DEADLINE_EXCEEDED","reason":"print_timeout"}\n'
+)
+
+
+def test_run_agy_print_timeout_exit_3_is_the_timeout_error(fake_agy_json, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stderr"] = _PRINT_TIMEOUT_STDERR_EXIT3
+    fake_agy_json["stdout"] = _json_result(
+        response="The hurdle of Western movable",
+        conv="c3",
+        status="ERROR",
+        error="print timeout after 5s with turn in progress",
+        finished_reason="print_timeout",
+    )
+    with pytest.raises(RuntimeError, match="5s timeout") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    msg = str(exc.value)
+    assert "Raise timeout_s" in msg
+    assert "--- partial answer" in msg and "Western movable" in msg
+    assert "agy exited" not in msg  # not the generic exit-code error
+    assert server._recorded_conv_id("C:\\ws") == "c3"
+
+
+def test_run_agy_print_timeout_exit_3_unpinned_leaves_the_continue_slot(
+    fake_agy_json, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stderr"] = _PRINT_TIMEOUT_STDERR_EXIT3
+    fake_agy_json["stdout"] = _json_result(
+        response="half", conv="c3", status="ERROR", finished_reason="print_timeout"
+    )
+    with pytest.raises(RuntimeError, match="5s timeout"):
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5, pin=False)
+    assert server._recorded_conv_id("C:\\ws") is None
+
+
+def test_run_agy_exit_3_finished_reason_alone_is_the_timeout_error(fake_agy_json, last_conv_file):
+    # The structured field is enough on its own: the stderr wording is not a contract.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stdout"] = _json_result(
+        response="cut here", conv="c3", status="ERROR", finished_reason="print_timeout"
+    )
+    with pytest.raises(RuntimeError, match="5s timeout") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    assert "cut here" in str(exc.value)
+
+
+def test_run_agy_exit_3_on_the_plain_text_path_is_the_timeout_error(fake_agy, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy["returncode"] = 3
+    fake_agy["stderr"] = _PRINT_TIMEOUT_STDERR_EXIT3
+    fake_agy["stdout"] = "half an answ"
+    with pytest.raises(RuntimeError, match="5s timeout") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    assert "half an answ" in str(exc.value)
+
+
+def test_run_agy_exit_3_without_a_timeout_mark_stays_the_generic_error(
+    fake_agy_json, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stderr"] = 'AGY_ERROR: {"status":"INTERNAL"}'
+    fake_agy_json["stdout"] = _json_result(response="", conv="c3", status="ERROR")
+    with pytest.raises(RuntimeError, match="agy exited 3") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    msg = str(exc.value)
+    assert "INTERNAL" in msg  # stderr tail
+    assert '"status": "ERROR"' in msg  # stdout tail
+    assert "timeout" not in msg
+    assert server._recorded_conv_id("C:\\ws") is None
+
+
+def test_run_agy_exit_3_quota_failure_keeps_the_quota_note(fake_agy_json, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stderr"] = "RESOURCE_EXHAUSTED: quota exceeded for gemini-4-argon-high"
+    fake_agy_json["stdout"] = _json_result(response="", status="ERROR")
+    with pytest.raises(RuntimeError, match="agy exited 3") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    assert "timeout" not in str(exc.value).splitlines()[0]
+
+
 def test_run_agy_print_timeout_unpinned_leaves_the_continue_slot(fake_agy_json, last_conv_file):
     last_conv_file.write_text(json.dumps({}), encoding="utf-8")
     fake_agy_json["stdout"] = _json_result(response="half", conv="swarm-worker")
@@ -1841,6 +1938,57 @@ def test_run_agy_print_timeout_on_the_plain_text_path(fake_agy, last_conv_file):
     with pytest.raises(RuntimeError, match="10s timeout") as exc:
         server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
     assert "half an answ" in str(exc.value)
+
+
+# agy 1.4.11 added `finished_reason` to the json result; verified on 1.4.12 that an
+# expired --print-timeout reports "print_timeout" with exit 0 and status SUCCESS.
+
+
+def test_run_agy_finished_reason_print_timeout_without_the_stderr_line(
+    fake_agy_json, last_conv_file
+):
+    # The structured field alone must be enough: the stderr wording is not a contract.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(
+        response="Movable type reached", conv="fr-cut", finished_reason="print_timeout"
+    )
+    with pytest.raises(RuntimeError, match="10s timeout") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert "Movable type reached" in str(exc.value)
+    assert server._recorded_conv_id("C:\\ws") == "fr-cut"
+
+
+@pytest.mark.parametrize("reason", ["error", "interrupted"])
+def test_run_agy_finished_early_is_an_error_not_a_truncated_answer(
+    fake_agy_json, last_conv_file, reason
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(
+        response="half of it", conv="fr-early", finished_reason=reason
+    )
+    with pytest.raises(RuntimeError, match=f"finished_reason={reason}") as exc:
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert "half of it" in str(exc.value) and "cut off" in str(exc.value)
+    assert server._recorded_conv_id("C:\\ws") == "fr-early"
+
+
+def test_run_agy_finished_early_beats_a_schema_answer(fake_agy_json, last_conv_file):
+    # A schema run cut short must not hand back structured_output as if it were whole.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(
+        response="", finished_reason="error", structured_output={"verdict": "positive"}
+    )
+    with pytest.raises(RuntimeError, match="finished_reason=error"):
+        server._run_agy("hi", "C:\\ws", False, 10, schema='{"type": "object"}')
+
+
+def test_run_agy_unknown_finished_reason_keeps_the_answer(fake_agy_json, last_conv_file):
+    # The field is documented as present only on an early end, but its vocabulary may
+    # grow. Like an unknown status, a value newer than the bridge is not worth
+    # throwing a real answer away over.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="whole answer", finished_reason="stop")
+    assert server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10) == "whole answer"
 
 
 def test_run_agy_json_empty_response_falls_back_to_transcript(
@@ -2014,8 +2162,10 @@ def test_stream_watch_does_not_double_emit_a_repeated_done(watch_slot):
 # --------------------------------------------------------------------------
 
 
-def _stream_lines(conv="c-stream", response="stream answer", status="SUCCESS"):
-    """A realistic agy 1.1.8 stream-json run: init, narration, a tool, the result."""
+def _stream_lines(conv="c-stream", response="stream answer", status="SUCCESS", **extra):
+    """A realistic agy 1.1.8 stream-json run: init, narration, a tool, the result.
+
+    `extra` lands in the result object, e.g. finished_reason (agy 1.4.11+)."""
     return (
         json.dumps({"event": "init", "conversation_id": conv, "init": {"cwd": "C:\\ws"}})
         + "\n"
@@ -2038,7 +2188,12 @@ def _stream_lines(conv="c-stream", response="stream answer", status="SUCCESS"):
         + json.dumps(
             {
                 "event": "result",
-                "result": {"conversation_id": conv, "status": status, "response": response},
+                "result": {
+                    "conversation_id": conv,
+                    "status": status,
+                    "response": response,
+                    **extra,
+                },
             }
         )
         + "\n"
@@ -2133,6 +2288,73 @@ def test_watched_print_timeout_is_an_error_not_a_truncated_answer(
     assert "cut mid-sent" in str(exc.value)
     assert server._watch_snapshot()["status"] == "error"
     assert server._recorded_conv_id("C:\\ws") == "wc-cut"
+
+
+def test_watched_print_timeout_exit_3_is_the_timeout_error(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["returncode"] = 3
+    fake_watched_agy["stdout"] = _stream_lines(
+        response="cut mid-sent", conv="wc3", status="ERROR", finished_reason="print_timeout"
+    )
+    fake_watched_agy["stderr"] = _PRINT_TIMEOUT_STDERR_EXIT3
+    with pytest.raises(RuntimeError, match="5s timeout") as exc:
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    assert "cut mid-sent" in str(exc.value)
+    assert "agy exited" not in str(exc.value)
+    assert server._watch_snapshot()["status"] == "error"
+    assert server._recorded_conv_id("C:\\ws") == "wc3"
+
+
+def test_watched_exit_3_finished_reason_alone_is_the_timeout_error(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["returncode"] = 3
+    fake_watched_agy["stdout"] = _stream_lines(
+        response="cut", conv="wc3", status="ERROR", finished_reason="print_timeout"
+    )
+    with pytest.raises(RuntimeError, match="5s timeout"):
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+
+
+def test_watched_exit_3_without_a_timeout_mark_stays_the_generic_error(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["returncode"] = 3
+    fake_watched_agy["stderr"] = 'AGY_ERROR: {"status":"INTERNAL"}'
+    fake_watched_agy["stdout"] = _stream_lines(response="", conv="wc3", status="ERROR")
+    with pytest.raises(RuntimeError) as exc:
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=5)
+    assert "exited 3" in str(exc.value)
+    assert "timeout" not in str(exc.value)
+    assert server._watch_snapshot()["status"] == "error"
+
+
+def test_watched_finished_reason_print_timeout_is_a_timeout(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines(
+        response="cut", conv="wc-fr", finished_reason="print_timeout"
+    )
+    with pytest.raises(RuntimeError, match="10s timeout"):
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert server._watch_snapshot()["status"] == "error"
+
+
+def test_watched_finished_early_is_an_error(fake_watched_agy, brain_dir, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines(
+        response="half", conv="wc-err", finished_reason="error"
+    )
+    with pytest.raises(RuntimeError, match="finished_reason=error") as exc:
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert "half" in str(exc.value)
+    assert server._watch_snapshot()["status"] == "error"
+    assert server._recorded_conv_id("C:\\ws") == "wc-err"
 
 
 def test_watched_stream_without_result_event_falls_back_to_transcript(
@@ -2772,11 +2994,93 @@ def test_collect_status_dirs_absent(tmp_path, monkeypatch):
     assert d["brain dir"][0] is False
 
 
+def _age_conv(brain, conv_id, seconds_ago):
+    """Backdate a conversation's brain dir, which is what orders them newest-first."""
+    when = time.time() - seconds_ago
+    os.utime(brain / conv_id, (when, when))
+
+
+def _transcript_row():
+    ok, detail = _status_dict([server._transcript_status_row()])["newest transcript"]
+    return ok, detail
+
+
 def test_collect_status_unreadable_transcript(status_dirs, monkeypatch):
+    """A finished conversation the bridge cannot read is still a real failure."""
     monkeypatch.setattr(server, "_get_agy_version", lambda: "1.0.5")
-    (status_dirs["brain"] / "c1").mkdir()  # conv dir exists but no transcript
+    _write_transcript(status_dirs["brain"], "c1", [_entry("RUN_COMMAND", "step")])
+    _age_conv(status_dirs["brain"], "c1", 3600)
     rows = server._collect_status()
     assert _status_dict(rows)["newest transcript"][0] is False
+
+
+# Issue #8: the row read only the single newest conversation, which is often not
+# finished, and flipped Overall to PROBLEMS FOUND while every call worked.
+
+
+def test_transcript_row_skips_an_empty_newest_conversation(status_dirs):
+    # agy leaves an empty brain dir behind when it self-updates.
+    _write_transcript(status_dirs["brain"], "done", [_entry("PLANNER_RESPONSE", "ans")])
+    _age_conv(status_dirs["brain"], "done", 600)
+    (status_dirs["brain"] / "empty").mkdir()
+    _age_conv(status_dirs["brain"], "empty", 10)  # newest
+    ok, detail = _transcript_row()
+    assert ok is True
+    assert detail.startswith("readable") and "skipped 1" in detail
+
+
+def test_transcript_row_skips_a_newer_failed_turn(status_dirs):
+    # A turn that died on a quota error or a soft-denied tool wrote no answer; an
+    # older conversation still shows the read path works.
+    _write_transcript(status_dirs["brain"], "done", [_entry("PLANNER_RESPONSE", "ans")])
+    _age_conv(status_dirs["brain"], "done", 7200)
+    _write_transcript(status_dirs["brain"], "failed", [_entry("GENERIC", status="ERROR")])
+    _age_conv(status_dirs["brain"], "failed", 3600)
+    ok, detail = _transcript_row()
+    assert ok is True and "skipped 1" in detail
+
+
+def test_transcript_row_ok_when_only_empty_or_running_conversations(status_dirs):
+    (status_dirs["brain"] / "empty").mkdir()
+    _age_conv(status_dirs["brain"], "empty", 3600)
+    # Another bridge call or a swarm worker is mid-turn: transcript, no answer yet.
+    _write_transcript(status_dirs["brain"], "running", [_entry("USER_INPUT", source="USER")])
+    ok, detail = _transcript_row()
+    assert ok is True and "nothing finished" in detail
+
+
+def test_transcript_row_fails_when_no_recent_conversation_is_readable(status_dirs):
+    for i in range(3):
+        _write_transcript(status_dirs["brain"], f"c{i}", [_entry("RUN_COMMAND", "step")])
+        _age_conv(status_dirs["brain"], f"c{i}", 3600 + i)
+    ok, detail = _transcript_row()
+    assert ok is False and detail.startswith("none of the 3 newest is readable")
+
+
+def test_transcript_row_looks_no_further_than_the_probe_limit(status_dirs, monkeypatch):
+    monkeypatch.setattr(server, "_TRANSCRIPT_PROBE_LIMIT", 2)
+    _write_transcript(status_dirs["brain"], "old-good", [_entry("PLANNER_RESPONSE", "ans")])
+    _age_conv(status_dirs["brain"], "old-good", 9000)
+    for i in range(2):
+        _write_transcript(status_dirs["brain"], f"bad{i}", [_entry("RUN_COMMAND", "step")])
+        _age_conv(status_dirs["brain"], f"bad{i}", 3600 + i)
+    ok, _ = _transcript_row()
+    assert ok is False
+
+
+def test_transcript_row_no_conversations(status_dirs):
+    assert _transcript_row() == (True, "no conversations yet")
+
+
+def test_antigravity_status_overall_ok_with_an_empty_newest_conversation(status_dirs, monkeypatch):
+    """The exact report from issue #8, end to end through the tool's Overall line."""
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.0.5")
+    monkeypatch.setattr(server, "_fetch_latest_release_version", lambda: None)
+    _write_transcript(status_dirs["brain"], "done", [_entry("PLANNER_RESPONSE", "ans")])
+    _age_conv(status_dirs["brain"], "done", 600)
+    (status_dirs["brain"] / "empty").mkdir()
+    out = server.antigravity_status()
+    assert out.splitlines()[-1] == "Overall: OK"
 
 
 def test_antigravity_status_formats_report(status_dirs, monkeypatch):
@@ -2880,6 +3184,188 @@ def test_collect_status_includes_quota_rows(status_dirs, monkeypatch):
     d = _status_dict(server._collect_status())
     assert d["quota: Gemini Models"] == (True, "Weekly 100%, Five Hour 100%")
     assert d["quota: Claude and GPT models"][0] is True
+
+
+# --------------------------------------------------------------------------
+# quota failures  (issue #7: say which family is out and which still has quota)
+# --------------------------------------------------------------------------
+
+# agy 1.4.12's `/usage` with one family empty, as issue #7 reported it.
+_USAGE_ARGON_EMPTY = (
+    "Gemini Models\tWeekly Limit Remaining\t91%\t2026-11-09T13:12:12Z\n"
+    "Gemini Models\tFive Hour Limit Remaining\t100%\t2026-11-02T18:12:12Z\n"
+    "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-09T13:12:12Z\n"
+    "Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t0%\t2026-11-04T13:34:06Z\n"
+)
+_LIVE_MODELS = [
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
+    "claude-opus-5-5-low",
+    "claude-sonnet-5-5-high",
+    "gpt-oss-120b-medium",
+]
+# The error issue #7 got back from a failed antigravity_ask.
+_QUOTA_STDERR = "Error: Individual quota reached, resets in ~75h\n"
+
+
+@pytest.fixture
+def quota_usage(monkeypatch):
+    """A readable `/usage` (counted), the live model list, and an empty report cache."""
+    cfg = {"usage": _USAGE_ARGON_EMPTY, "reads": 0}
+
+    def fake_read():
+        cfg["reads"] += 1
+        return cfg["usage"]
+
+    monkeypatch.setattr(server, "supports_print_usage", lambda: True)
+    monkeypatch.setattr(server, "_read_agy_usage", fake_read)
+    monkeypatch.setattr(server, "list_agy_models", lambda: list(_LIVE_MODELS))
+    monkeypatch.setattr(server, "_agy_settings_model", lambda: None)
+    monkeypatch.setattr(server, "_QUOTA_REPORT_CACHE", None)
+    return cfg
+
+
+def test_parse_usage_table_keeps_reset_times_and_family_specific_limits():
+    table = server._parse_usage_table(_USAGE_ARGON_EMPTY)
+    assert list(table) == ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]
+    assert table["Gemini 4 Argon"] == [("Gemini 4 Argon Weekly", "0%", "2026-11-04T13:34:06Z")]
+    rows = _status_dict(server._parse_usage_rows(_USAGE_ARGON_EMPTY))
+    assert rows["quota: Gemini 4 Argon"] == (False, "Gemini 4 Argon Weekly 0%")
+
+
+@pytest.mark.parametrize(
+    "model,family",
+    [
+        ("gemini-4-argon-high", "Gemini 4 Argon"),  # its own family beats "Gemini Models"
+        ("gemini-3.8-flash-high", "Gemini Models"),
+        ("claude-opus-5-5-low", "Claude and GPT models"),
+        ("gpt-oss-120b-medium", "Claude and GPT models"),
+        ("Gemini 4 Argon (High)", "Gemini 4 Argon"),  # settings.json holds the label
+        ("Gemini 3.8 Flash (High)", "Gemini Models"),
+        ("llama-9", None),
+        (None, None),
+    ],
+)
+def test_model_usage_family(model, family):
+    families = ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]
+    assert server._model_usage_family(model, families) == family
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (_QUOTA_STDERR, True),
+        ("429 Too Many Requests", True),
+        ("RESOURCE_EXHAUSTED: rate limit exceeded", True),
+        ("Error: authentication timed out", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_looks_like_quota_failure(text, expected):
+    assert server._looks_like_quota_failure(text) is expected
+
+
+def test_quota_note_names_the_empty_family_and_a_model_to_retry_with(quota_usage):
+    note = server._quota_failure_note("gemini-4-argon-high")
+    assert "Gemini 4 Argon: Gemini 4 Argon Weekly 0% (resets 2026-11-04T13:34:06Z)" in note
+    assert "<- OUT OF QUOTA" in note
+    assert "draws on Gemini 4 Argon, and that family is out of quota" in note
+    assert 'model="gemini-3.8-flash-high"' in note
+    assert 'model="claude-opus-5-5-low"' in note
+    assert "argon" not in note.split("retry with", 1)[1]  # never suggests the empty family
+
+
+def test_quota_note_resolves_the_default_model_from_settings(quota_usage, monkeypatch):
+    # issue #7's call passed no model: the default was the exhausted family.
+    monkeypatch.setattr(server, "_agy_settings_model", lambda: "Gemini 4 Argon (High)")
+    note = server._quota_failure_note(None)
+    assert "agy's default model (Gemini 4 Argon (High))" in note
+    assert "that family is out of quota" in note
+    assert 'model="gemini-3.8-flash-high"' in note
+
+
+def test_quota_note_when_the_used_family_still_has_quota(quota_usage):
+    note = server._quota_failure_note("gemini-3.8-flash-high")
+    assert "Gemini Models, and that family still shows quota" in note
+    assert "retry with a model" not in note
+
+
+def test_quota_note_when_no_family_is_empty(quota_usage):
+    quota_usage["usage"] = _USAGE_TSV
+    note = server._quota_failure_note("gemini-3.8-flash-high")
+    assert "short-term rate limit" in note and "OUT OF QUOTA" not in note
+
+
+def test_quota_note_when_every_family_is_empty(quota_usage):
+    quota_usage["usage"] = "Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-09T13:12:12Z\n"
+    note = server._quota_failure_note("gemini-3.8-flash-high")
+    assert "Every model family is out of quota" in note
+
+
+def test_quota_note_when_usage_is_unreadable(quota_usage):
+    quota_usage["usage"] = None
+    note = server._quota_failure_note("gemini-4-argon-high")
+    assert "could not be read" in note and "different `model`" in note
+
+
+def test_quota_note_never_reads_like_an_auth_failure(quota_usage):
+    # swarm workers retry serialized on an auth signature in the error text; the
+    # note must never trip that.
+    for model in ("gemini-4-argon-high", None):
+        assert not swarm._looks_like_auth_failure(server._quota_failure_note(model))
+
+
+def test_quota_report_is_read_once_for_a_burst_of_failures(quota_usage):
+    for _ in range(5):
+        server._with_quota_note("agy exited 1", _QUOTA_STDERR, "gemini-4-argon-high")
+    assert quota_usage["reads"] == 1
+
+
+def test_with_quota_note_leaves_other_failures_alone(quota_usage):
+    assert server._with_quota_note("agy exited 2", "boom", None) == "agy exited 2"
+    assert quota_usage["reads"] == 0
+
+
+def test_with_quota_note_never_masks_the_real_error(quota_usage, monkeypatch):
+    def broken(model):
+        raise ValueError("bug in the note")
+
+    monkeypatch.setattr(server, "_quota_failure_note", broken)
+    assert server._with_quota_note("agy exited 1", _QUOTA_STDERR) == "agy exited 1"
+
+
+def test_run_agy_quota_failure_says_which_family_is_out(fake_agy_json, quota_usage):
+    fake_agy_json["returncode"] = 1
+    fake_agy_json["stderr"] = _QUOTA_STDERR
+    with pytest.raises(RuntimeError) as exc:
+        server._run_agy("hi", "C:\\ws", False, 10, model="gemini-4-argon-high")
+    msg = str(exc.value)
+    assert msg.startswith("agy exited 1") and "Individual quota reached" in msg
+    assert "that family is out of quota" in msg and 'model="gemini-3.8-flash-high"' in msg
+
+
+def test_run_agy_other_failures_spend_no_usage_read(fake_agy_json, quota_usage):
+    fake_agy_json["returncode"] = 3
+    fake_agy_json["stderr"] = "AGY_ERROR: model returned an invalid response"
+    with pytest.raises(RuntimeError, match="agy exited 3") as exc:
+        server._run_agy("hi", "C:\\ws", False, 10)
+    assert "Quota left" not in str(exc.value) and quota_usage["reads"] == 0
+
+
+def test_watched_quota_failure_says_which_family_is_out(
+    fake_watched_agy, quota_usage, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["returncode"] = 1
+    fake_watched_agy["stderr"] = _QUOTA_STDERR
+    with pytest.raises(RuntimeError) as exc:
+        server._run_agy_watched("hi", "C:\\ws", False, 10, "gemini-4-argon-high")
+    assert "that family is out of quota" in str(exc.value)
 
 
 def test_codex_status_includes_bridge_version_row(monkeypatch):
@@ -3485,3 +3971,530 @@ def test_plugin_launches_the_published_package_unpinned():
     servers = json.loads((_plugin_root() / ".mcp.json").read_text(encoding="utf-8"))
     (entry,) = servers["mcpServers"].values()
     assert entry == {"command": "uvx", "args": ["agent-intern"]}
+
+
+# --------------------------------------------------------------------------
+# _run_agy_image_watched when agy cuts the turn at --print-timeout (exit 3 on 1.5.0+,
+# exit 0 before) and no image exists: the timeout is the cause, not a missing file
+# --------------------------------------------------------------------------
+
+_IMG_PRINT_TIMEOUT = (
+    "[agy] print timeout after 5s with turn in progress; returning partial output\n"
+    'AGY_ERROR: {"status":"DEADLINE_EXCEEDED","reason":"print_timeout"}\n'
+)
+
+
+@pytest.fixture
+def watched_image_run(monkeypatch, brain_dir, last_conv_file):
+    """Run _run_agy_image_watched against a scripted agy: set .returncode/.stderr."""
+    cfg = {"returncode": 3, "stderr": _IMG_PRINT_TIMEOUT}
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+
+    class _Popen:
+        def __init__(self, *a, **k):
+            self.returncode = cfg["returncode"]
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO(cfg["stderr"])
+            self._n = 2
+
+        def poll(self):
+            self._n -= 1
+            return None if self._n > 0 else self.returncode
+
+        def communicate(self, timeout=None):
+            return ("", "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: _Popen())
+    monkeypatch.setattr(server, "_ensure_watch_server", lambda: 12345)
+    monkeypatch.setattr(server, "_open_watch_window", lambda *a, **k: None)
+    monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_RESPONSE_POLL_DEADLINE_S", 0.0)
+    return cfg
+
+
+def _no_image(target, txt, start):
+    raise RuntimeError("no image file produced")
+
+
+@pytest.mark.parametrize("returncode", [3, 0])
+def test_watched_image_no_image_after_a_print_timeout_says_timeout(
+    watched_image_run, monkeypatch, returncode
+):
+    watched_image_run["returncode"] = returncode
+    monkeypatch.setattr(server, "_finalize_image", _no_image)
+    with pytest.raises(RuntimeError) as exc:
+        server._run_agy_image_watched("wrapped", "C:/out/art.png", "C:\\ws", 5, "draw")
+    msg = str(exc.value)
+    assert msg.startswith("agy hit its 5s timeout")
+    assert "Raise timeout_s" in msg
+    assert msg.endswith("(no image file produced)")  # the finalize error rides along
+    assert server._watch_snapshot()["status"] == "error"
+
+
+def test_watched_image_exit_3_without_the_mark_stays_the_missing_image_error(
+    watched_image_run, monkeypatch
+):
+    watched_image_run["stderr"] = 'AGY_ERROR: {"status":"INTERNAL"}'
+    monkeypatch.setattr(server, "_finalize_image", _no_image)
+    with pytest.raises(RuntimeError) as exc:
+        server._run_agy_image_watched("wrapped", "C:/out/art.png", "C:\\ws", 5, "draw")
+    assert "no image file produced" in str(exc.value)
+    assert "hit its" not in str(exc.value)
+
+
+def test_watched_image_written_before_the_cut_is_still_returned(watched_image_run, monkeypatch):
+    monkeypatch.setattr(
+        server, "_finalize_image", lambda target, txt, start: ("C:/out/art.png", "PNG", 99)
+    )
+    out = server._run_agy_image_watched("wrapped", "C:/out/art.png", "C:\\ws", 5, "draw")
+    assert "C:/out/art.png" in out and "format=PNG" in out
+    assert server._watch_snapshot()["image"] == "C:/out/art.png"
+
+
+# --------------------------------------------------------------------------
+# The tool surface: names, parameter names and which are required. Rewording the
+# instructions or the descriptions must never rename a tool or change a signature:
+# clients, the plugin skills and users' saved prompts all name them.
+# --------------------------------------------------------------------------
+
+_TOOL_SURFACE = {
+    "agent_swarm": (["tasks", "max_concurrency", "timeout_s", "watch"], ["tasks"]),
+    "antigravity_ask": (
+        ["prompt", "workspace", "model", "timeout_s", "watch", "plan", "schema"],
+        ["prompt"],
+    ),
+    "antigravity_continue": (
+        ["prompt", "workspace", "model", "timeout_s", "watch", "plan", "schema"],
+        ["prompt"],
+    ),
+    "antigravity_image": (
+        ["prompt", "output_path", "workspace", "timeout_s", "watch", "wait_sec"],
+        ["prompt"],
+    ),
+    "antigravity_image_swarm": (
+        ["prompts", "output_paths", "workspaces", "max_concurrency", "timeout_s", "watch", "wait_sec"],
+        ["prompts"],
+    ),
+    "antigravity_job_result": (["job_id", "wait_sec"], ["job_id"]),
+    "antigravity_status": ([], []),
+    "claude_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "claude_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "claude_status": ([], []),
+    "codex_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "codex_continue": (["prompt", "workspace", "timeout_s", "watch"], ["prompt"]),
+    "codex_status": ([], []),
+    "copilot_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "copilot_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "copilot_status": ([], []),
+    "cursor_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "cursor_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "cursor_status": ([], []),
+    "grok_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "grok_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "grok_status": ([], []),
+    "kimi_ask": (["prompt", "workspace", "model", "timeout_s"], ["prompt"]),
+    "kimi_continue": (["prompt", "workspace", "timeout_s"], ["prompt"]),
+    "kimi_status": ([], []),
+    "muse_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "muse_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "muse_status": ([], []),
+    "opencode_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
+    "opencode_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "opencode_status": ([], []),
+    "preset_swarm": (
+        ["preset", "material", "workspace", "timeout_s", "max_concurrency", "watch"],
+        ["preset", "material"],
+    ),
+    "swarm_presets": (["name", "workspace"], []),
+}
+
+
+def _tool_surface():
+    lister = getattr(server.mcp, "list_tools", None)
+    if lister is not None:
+        tools = asyncio.run(lister())
+    else:
+        tools = list(asyncio.run(server.mcp.get_tools()).values())
+    out = {}
+    for t in tools:
+        params = t.parameters or {}
+        out[t.name] = (list(params.get("properties", {})), list(params.get("required", [])))
+    return out
+
+
+def test_the_tool_surface_is_unchanged():
+    got = _tool_surface()
+    assert sorted(got) == sorted(_TOOL_SURFACE), (
+        f"added: {sorted(set(got) - set(_TOOL_SURFACE))}, "
+        f"removed: {sorted(set(_TOOL_SURFACE) - set(got))}"
+    )
+    changed = {n: (got[n], _TOOL_SURFACE[n]) for n in got if got[n] != _TOOL_SURFACE[n]}
+    assert not changed, f"signature changed: {changed}"
+
+
+def test_there_are_thirty_three_tools():
+    # 32 upstream + antigravity_job_result (async image jobs).
+    assert len(_TOOL_SURFACE) == 33 and len(_tool_surface()) == 33
+
+
+# --------------------------------------------------------------------------
+# The instructions and tool descriptions are a budget: every host loads them into the
+# model's context on every session. They are capped, ordered so the routing facts come
+# first (a host may truncate), and every fact a model relies on is also in the tool
+# descriptions, not only in the instructions. Phrase checks collapse whitespace,
+# because docstrings wrap and a phrase can span lines.
+# --------------------------------------------------------------------------
+
+_INSTRUCTIONS_CAP = 3_800
+_EARLY_FACTS_BY = 1_900  # the trigger, the picker and the workspace rule end before this
+_TOOL_DESCRIPTION_CAP = 900
+_PARAM_DESCRIPTION_CAP = 600
+_EXPERIMENTAL = {"grok", "kimi", "muse"}
+
+
+def _all_subsets():
+    return [
+        tuple(b for i, b in enumerate(server.BACKENDS) if mask >> i & 1)
+        for mask in range(1, 1 << len(server.BACKENDS))
+    ]
+
+
+def _words(text):
+    return " ".join((text or "").split())
+
+
+@pytest.fixture(scope="module")
+def instructions_by_subset():
+    return {s: server._server_instructions(s) for s in _all_subsets()}
+
+
+def test_every_subset_of_backends_has_instructions_within_the_cap(instructions_by_subset):
+    assert len(instructions_by_subset) == 2 ** len(server.BACKENDS) - 1
+    over = {s: len(t) for s, t in instructions_by_subset.items() if len(t) > _INSTRUCTIONS_CAP}
+    assert not over, (
+        f"{len(over)} subsets exceed {_INSTRUCTIONS_CAP} chars, e.g. {list(over.items())[:2]}"
+    )
+
+
+def test_the_all_backends_variant_is_the_longest_and_leaves_headroom(instructions_by_subset):
+    everything = server._server_instructions(server.BACKENDS)
+    assert len(everything) == max(len(t) for t in instructions_by_subset.values())
+    assert len(everything) <= _INSTRUCTIONS_CAP
+
+
+_ORDER = (
+    "OFFER IT",
+    "Pick: ",
+    "ALWAYS pass workspace=<the project dir>",
+    "Backends:",
+    "Mechanics:",
+    "Security:",
+)
+
+
+def test_the_sections_come_in_the_documented_order_for_every_subset(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        positions = [text.find(marker) for marker in _ORDER]
+        assert -1 not in positions, f"{subset}: missing {_ORDER[positions.index(-1)]!r}"
+        assert positions == sorted(set(positions)), f"{subset}: sections out of order"
+
+
+def test_security_is_the_last_paragraph_for_every_subset(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        last = text.rstrip().split("\n\n")[-1]
+        assert last.startswith("Security:"), f"{subset}: {last[:40]!r} comes after Security"
+
+
+def test_the_routing_facts_are_all_in_the_first_1900_characters(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        head = text[:_EARLY_FACTS_BY]
+        assert "OFFER IT" in head and "Pick: " in head, subset
+        workspace_line = text[text.index("ALWAYS pass workspace=") :].split("\n")[0]
+        end = text.index(workspace_line) + len(workspace_line)
+        assert end <= _EARLY_FACTS_BY, f"{subset}: the workspace rule ends at char {end}"
+
+
+def test_the_workspace_rule_says_why(instructions_by_subset):
+    text = instructions_by_subset[server.BACKENDS]
+    assert "sees no repo" in text and "server's cwd" in text
+
+
+def test_the_opening_names_exactly_the_enabled_backends(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        titles = [server._BACKEND_TITLES[b] for b in subset]
+        named = titles[0] if len(titles) == 1 else ", ".join(titles[:-1]) + " and " + titles[-1]
+        assert text.startswith(
+            f"This server runs {named} as sub-agents on the USER'S OWN quota."
+        ), subset
+
+
+def test_images_are_mentioned_only_with_antigravity(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        assert ("generate images" in text) == ("antigravity" in subset), subset
+        assert ("antigravity_image" in text) == ("antigravity" in subset), subset
+
+
+def test_the_swarm_triggers_appear_only_with_a_swarm_backend(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        swarmable = bool(server._SWARM_BACKENDS & set(subset))
+        assert ("agent_swarm" in text) == swarmable, subset
+        assert ("preset_swarm" in text) == swarmable, subset
+
+
+def test_the_picker_lists_exactly_the_enabled_backends(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        picker = text[text.index("Pick: ") :].split("\n")[0]
+        assert picker == "Pick: " + "; ".join(server._BACKEND_PICKS[b] for b in subset) + ".", (
+            subset
+        )
+        for backend in server.BACKENDS:
+            assert (f"{backend}_* " in picker) == (backend in subset), (subset, backend)
+
+
+def test_the_backend_lines_exist_only_for_enabled_backends(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        for backend in server.BACKENDS:
+            assert (f"- {backend}_* (" in text) == (backend in subset), (subset, backend)
+
+
+def test_a_disabled_backend_is_never_named_anywhere(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        for backend in server.BACKENDS:
+            if backend not in subset:
+                assert f"{backend}_" not in text, (subset, backend)
+
+
+def test_the_experimental_warning_appears_only_with_an_experimental_backend(
+    instructions_by_subset,
+):
+    for subset, text in instructions_by_subset.items():
+        has = bool(_EXPERIMENTAL & set(subset))
+        assert ("Run an EXPERIMENTAL backend's *_status first" in text) == has, subset
+        if not has:
+            assert "EXPERIMENTAL" not in text, subset
+
+
+def test_the_mechanics_paragraph_carries_the_operating_rules(instructions_by_subset):
+    for subset, text in instructions_by_subset.items():
+        mechanics = _words(text[text.index("Mechanics:") : text.index("Security:")])
+        for phrase in (
+            "*_continue resumes the thread rooted at that workspace",
+            "spends no quota",
+            "bridge version",
+            "tell the user",
+            "watch=true",
+        ):
+            assert phrase in mechanics, f"{subset}: Mechanics lacks {phrase!r}"
+
+
+def test_the_security_paragraph_says_to_use_trusted_prompts_only(instructions_by_subset):
+    for text in instructions_by_subset.values():
+        assert "trusted prompts" in text[text.index("Security:") :]
+
+
+def test_one_backend_still_reads_naturally():
+    text = server._server_instructions(("codex",))
+    assert text.startswith("This server runs OpenAI Codex as sub-agents on the USER'S OWN quota.")
+    assert "Pick: codex_*" in text and "agent_swarm" in text
+    for word in ("antigravity", "Gemini", "EXPERIMENTAL", "copilot", "opencode", "kimi"):
+        assert word not in text
+
+
+# ---- tool descriptions
+
+
+@pytest.fixture(scope="module")
+def tool_docs():
+    """{name: (description, {param: description})} for every registered tool."""
+    lister = getattr(server.mcp, "list_tools", None)
+    tools = asyncio.run(lister()) if lister else list(asyncio.run(server.mcp.get_tools()).values())
+    out = {}
+    for t in tools:
+        props = (t.parameters or {}).get("properties", {})
+        out[t.name] = (
+            _words(t.description),
+            {k: _words(v.get("description")) for k, v in props.items()},
+        )
+    return out
+
+
+def _tools(tool_docs, suffix):
+    return {n: d for n, d in tool_docs.items() if n.endswith(suffix)}
+
+
+def test_every_tool_description_is_within_the_cap(tool_docs):
+    assert len(tool_docs) == 33
+    long ={n: len(d) for n, (d, _) in tool_docs.items() if len(d) > _TOOL_DESCRIPTION_CAP}
+    assert not long, f"over {_TOOL_DESCRIPTION_CAP} chars: {long}"
+
+
+def test_every_parameter_description_is_within_the_cap(tool_docs):
+    long = {
+        f"{n}.{p}": len(d)
+        for n, (_, params) in tool_docs.items()
+        for p, d in params.items()
+        if len(d) > _PARAM_DESCRIPTION_CAP
+    }
+    assert not long, f"over {_PARAM_DESCRIPTION_CAP} chars: {long}"
+
+
+def test_every_ask_continue_and_the_swarm_tool_carry_the_workspace_rule(tool_docs):
+    names = [n for n in tool_docs if n.endswith(("_ask", "_continue")) or n == "agent_swarm"]
+    assert len(names) == 9 * 2 + 1
+    for n in names:
+        d = tool_docs[n][0]
+        for phrase in ("workspace=<project dir>", "sees no repo", "trusted prompts only"):
+            assert phrase in d, f"{n} lacks {phrase!r}"
+
+
+def test_every_ask_starts_with_best_for_and_points_at_its_continue(tool_docs):
+    asks = _tools(tool_docs, "_ask")
+    assert len(asks) == 9
+    for n, (d, _) in asks.items():
+        assert d.startswith("Best for"), n
+        assert f"{n.removesuffix('_ask')}_continue" in d, n
+
+
+def test_the_swarm_tools_start_with_best_for(tool_docs):
+    assert tool_docs["agent_swarm"][0].startswith("Best for")
+    assert tool_docs["preset_swarm"][0].startswith("Best for")
+
+
+def test_every_continue_says_which_thread_it_resumes(tool_docs):
+    continues = _tools(tool_docs, "_continue")
+    assert len(continues) == 9
+    for n, (d, _) in continues.items():
+        assert "rooted at this workspace" in d, n
+
+
+def test_every_status_tool_relays_the_bridge_version_and_spends_no_quota(tool_docs):
+    statuses = _tools(tool_docs, "_status")
+    assert len(statuses) == 9
+    for n, (d, _) in statuses.items():
+        for phrase in ("Spends no quota", '"not found"', "bridge version", "tell the user"):
+            assert phrase in d, f"{n} lacks {phrase!r}"
+
+
+def test_the_claude_tools_say_they_are_for_other_hosts(tool_docs):
+    for n in ("claude_ask", "claude_continue", "claude_status"):
+        assert "for hosts other than Claude Code" in tool_docs[n][0], n
+
+
+def test_the_image_tool_says_it_is_the_only_generator(tool_docs):
+    assert tool_docs["antigravity_image"][0].startswith("Your only image generator")
+
+
+def test_the_antigravity_swarm_sandbox_exception_survives_the_shortening(tool_docs):
+    tasks = tool_docs["agent_swarm"][1]["tasks"]
+    assert "ANTIGRAVITY" in tasks
+    assert '"read-only" is plan mode' in tasks
+    assert '"workspace-write" is refused' in tasks
+    assert "UNRESTRICTED" in tasks
+    assert "set one" in tasks
+
+
+def test_every_routing_fact_in_the_instructions_is_also_in_the_tool_descriptions(tool_docs):
+    # A host may show only the tools, or truncate the instructions: what the model
+    # must know to call a tool correctly cannot live in the instructions alone.
+    for n, (d, _) in tool_docs.items():
+        if n.endswith(("_ask", "_continue")):
+            assert "workspace" in d, n
+        if n.endswith("_ask"):
+            assert "_continue" in d, n
+
+
+# ---- the tool surface does not move while the words do
+
+
+def test_rewording_kept_every_parameter_description_present(tool_docs):
+    # shortening a description must not empty one: a model reads these to fill the call
+    empty = [
+        f"{n}.{p}"
+        for n, (_, params) in tool_docs.items()
+        for p, d in params.items()
+        if p not in ("watch", "timeout_s") and not d
+    ]
+    assert not empty, f"parameters with no description: {empty}"
+
+
+# ---- `agent-intern rules`
+
+
+def test_rules_is_a_terminal_command_dispatched_lazily():
+    assert "rules" in server._CLI_COMMANDS
+
+
+def test_rules_prints_exactly_the_server_instructions_as_utf8(monkeypatch):
+    raw = io.BytesIO()
+    fake = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    monkeypatch.setattr(sys, "stdout", fake)
+    assert doctor.cli(["rules"]) == 0
+    fake.flush()
+    assert raw.getvalue() == (server.SERVER_INSTRUCTIONS + "\n").encode("utf-8")
+
+
+def test_rules_prints_the_enabled_backends_guide(monkeypatch, capsys):
+    monkeypatch.setattr(server, "SERVER_INSTRUCTIONS", server._server_instructions(("codex",)))
+    assert doctor.cli(["rules"]) == 0
+    out = capsys.readouterr().out
+    assert out == server._server_instructions(("codex",)) + "\n"
+    assert "codex_*" in out and "antigravity_*" not in out
+
+
+def test_rules_falls_back_to_text_when_stdout_has_no_buffer(monkeypatch):
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert doctor.cli(["rules"]) == 0
+    assert out.getvalue().rstrip("\n") == server.SERVER_INSTRUCTIONS
+
+
+def test_main_rules_exits_zero_without_starting_the_server(monkeypatch, capsys):
+    started = []
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: started.append(1))
+    with pytest.raises(SystemExit) as exc:
+        server.main(["rules"])
+    assert exc.value.code == 0 and started == []
+    assert capsys.readouterr().out.rstrip("\n") == server.SERVER_INSTRUCTIONS
+
+
+def test_help_lists_rules(capsys):
+    with pytest.raises(SystemExit):
+        doctor.cli(["--help"])
+    assert "rules" in capsys.readouterr().out
+
+
+def test_rules_in_a_real_process_honours_agent_intern_backends():
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env["AGENT_INTERN_BACKENDS"] = "codex"
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "server.py"), "rules"],
+        capture_output=True,
+        timeout=120,
+        env=env,
+        cwd=Path(__file__).parent,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-300:]
+    assert proc.stdout == (server._server_instructions(("codex",)) + "\n").encode("utf-8")
+    assert b"antigravity" not in proc.stdout
+
+
+def test_watch_state_carries_the_model_shown_next_to_the_backend():
+    rid = server._watch_begin("t", 1.0, backend="codex", model="gpt-5.5")
+    assert server._watch_snapshot(rid)["model"] == "gpt-5.5"
+    server._watch_finish(rid, "done", "a", 1.0)
+    rid2 = server._watch_begin("t2", 2.0)  # no model given: empty, not a guess
+    assert server._watch_snapshot(rid2)["model"] == ""
+    assert server._WATCH_IDLE["model"] == ""
+
+
+def test_the_watch_header_shows_the_model_as_a_chip_beside_the_backend_name():
+    import watch_ui
+
+    assert "setAgent(s.backend,null,s.model)" in server._WATCH_HTML
+    # the backend name and the model are separate elements: the model is a chip
+    assert '$("bkname").textContent=NAMES[AGENT]||AGENT;' in watch_ui.JS
+    assert 'const m=$("mdl");m.hidden=!model;' in watch_ui.JS
+    assert 'id="mdl"' in watch_ui.BODY and ".mdl{" in watch_ui.BASE_CSS
