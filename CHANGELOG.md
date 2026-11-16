@@ -10,6 +10,18 @@ summary.
 
 ## [Unreleased]
 
+### Added
+
+- **Image tools no longer die at the client's 60-second timeout.** Claude Code, like any client on the
+  official MCP SDK, abandons a tool call after about 60 s even while progress notifications arrive,
+  and an agy image routinely takes 2-5 minutes, so `antigravity_image` failed with "Request timed
+  out" while agy went on to write the file. `antigravity_image` and `antigravity_image_swarm` now run
+  the generation as a job and take `wait_sec` (default 45, max 50): a job done by then returns the
+  usual result, unchanged; otherwise the call returns `status: running` with a `job_id`. The new
+  `antigravity_job_result(job_id, wait_sec?)` waits again and returns the result, the same error the
+  tool would have raised, or `status: running`. Finished results are kept 60 minutes; jobs live in
+  memory, so a server restart loses the job but not the file.
+
 ## [0.33.0] - 2026-10-14
 
 ### Added

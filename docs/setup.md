@@ -112,10 +112,10 @@ Then point Claude Code at the absolute path to `server.py` under `mcpServers` in
 </td></tr>
 </table>
 
-Restart Claude Code. **Twenty-nine tools** appear, each prefixed `mcp__agent-intern__`:
+Restart Claude Code. **Thirty tools** appear, each prefixed `mcp__agent-intern__`:
 
-- **Antigravity (5):** `antigravity_ask`, `antigravity_continue`, `antigravity_image`,
-  `antigravity_image_swarm`, `antigravity_status`
+- **Antigravity (6):** `antigravity_ask`, `antigravity_continue`, `antigravity_image`,
+  `antigravity_image_swarm`, `antigravity_job_result`, `antigravity_status`
 - **Codex (3):** `codex_ask`, `codex_continue`, `codex_status`
 - **Copilot (3):** `copilot_ask`, `copilot_continue`, `copilot_status`
 - **Cursor (3):** `cursor_ask`, `cursor_continue`, `cursor_status`
@@ -144,9 +144,9 @@ do the same.
 ### Load only the backends you use
 
 Every tool's description, and the routing guide, sit in the model's context in every session: about
-15,500 tokens for all 29 tools. List the backends you use in **`AGENT_INTERN_BACKENDS`** and the
+15,500 tokens for all 30 tools. List the backends you use in **`AGENT_INTERN_BACKENDS`** and the
 server leaves the rest out, both their tools and their part of the routing guide. With
-`antigravity,codex` that is 11 tools and about 7,500 tokens; with `codex` alone, 6 tools and about
+`antigravity,codex` that is 12 tools and about 7,500 tokens; with `codex` alone, 6 tools and about
 4,000.
 
 ```bash

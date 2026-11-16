@@ -2,7 +2,7 @@
 
 <sub>[← back to the README](../README.md) · [all docs](README.md)</sub>
 
-All 29 tools, their arguments and defaults.
+All 30 tools, their arguments and defaults.
 
 ## Tools
 
@@ -12,8 +12,9 @@ All 29 tools, their arguments and defaults.
 |---|---|
 | `antigravity_ask(prompt, workspace?, model?, timeout_s?=180, watch?=false, plan?=false, schema?)` | Start a **new** Antigravity conversation. `model` selects the model (agy's `--model`, e.g. `"claude-sonnet-5-5-high"`); validated against `agy models`, defaults to your `settings.json` model. `watch=true` opens the live browser view ([Watch mode](watch-and-swarm.md#watch-mode)). `plan=true` runs agy in **plan mode** — it reads and writes a plan, but does not edit files or run commands ([Security](security.md#security); agy 1.1.12+). `schema` (a JSON Schema) returns the **validated object** as JSON text instead of prose — read the caveat in [Status & caveats](status.md#status--caveats) before using it for a judgment (agy 1.1.8+). |
 | `antigravity_continue(prompt, workspace?, model?, timeout_s?=180, watch?=false, plan?=false, schema?)` | Continue the conversation **rooted at `workspace`** (pinned by id). agy's model is per-invocation, so `model` can differ from the original ask — and so are `plan` and `schema`, so a follow-up can be restricted, or shaped, even if the original ask was not. `watch=true` opens the live view. |
-| `antigravity_image(prompt, output_path?, workspace?, timeout_s?=240, watch?=false)` | Generate an image; saves the file (extension corrected to the real bytes) and returns its path + format/size. `watch=true` streams progress and **shows the image** inline. |
-| `antigravity_image_swarm(prompts, output_paths?, workspaces?, max_concurrency?=4, timeout_s?=240, watch?=false)` | Generate **several images in parallel** (one worker per prompt). |
+| `antigravity_image(prompt, output_path?, workspace?, timeout_s?=240, watch?=false, wait_sec?=45)` | Generate an image; saves the file (extension corrected to the real bytes) and returns its path + format/size. `watch=true` streams progress and **shows the image** inline. If the image is not done within `wait_sec` (max 50, under the ~60 s client timeout), returns `status: running` + a `job_id` for `antigravity_job_result`. |
+| `antigravity_image_swarm(prompts, output_paths?, workspaces?, max_concurrency?=4, timeout_s?=240, watch?=false, wait_sec?=45)` | Generate **several images in parallel** (one worker per prompt). Same `wait_sec` / `job_id` behaviour as `antigravity_image`. |
+| `antigravity_job_result(job_id, wait_sec?=45)` | Collect an image job that returned `status: running`: waits up to `wait_sec`, then returns the finished result (or its error), or `status: running` again. Finished results are kept 60 minutes. Spends no quota. |
 | `antigravity_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, **remaining AI Pro quota per model family** (agy 1.1.11+), plus agy version/compat, state dirs, and newest-transcript readability. Spends no quota. |
 
 ### 🤖 Codex

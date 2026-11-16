@@ -572,7 +572,8 @@ on the USER'S OWN quota. Delegating here {gains}."""
     if "antigravity" in enabled:
         triggers.append("""\
 - the user wants an IMAGE — antigravity_image is your only image generator \
-(antigravity_image_swarm for several at once).""")
+(antigravity_image_swarm for several at once). A slow one answers `status: \
+running` with a job_id; collect it with antigravity_job_result.""")
     if _SWARM_BACKENDS.intersection(enabled):
         triggers.append("""\
 - a job splits into many independent sub-tasks — agent_swarm runs them in \

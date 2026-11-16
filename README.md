@@ -150,9 +150,9 @@ can't see your files there. The bridge flags it with a visible warning instead o
 confident, unsourced answer. [Details →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/security.md#codex--a-real-sandbox-you-should-use)</sub>
 
 Every backend gets `*_ask`, `*_continue` (resume the same thread) and `*_status` (diagnostics, no
-quota spent). Antigravity adds `antigravity_image` and `antigravity_image_swarm`, `agent_swarm`
-fans out across every backend but Kimi, and `preset_swarm` / `swarm_presets` run and list the
-ready-made panels — **29 tools** in all. Only use some backends? Set `AGENT_INTERN_BACKENDS` and the
+quota spent). Antigravity adds `antigravity_image`, `antigravity_image_swarm` and
+`antigravity_job_result`, `agent_swarm` fans out across every backend but Kimi, and `preset_swarm` /
+`swarm_presets` run and list the ready-made panels — **30 tools** in all. Only use some backends? Set `AGENT_INTERN_BACKENDS` and the
 rest stay out of Claude's context. [How →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/setup.md#load-only-the-backends-you-use)
 [Tool reference →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/tools.md) ·
 [How each backend is driven →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/backends.md)

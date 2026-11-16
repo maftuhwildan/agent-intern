@@ -1,5 +1,6 @@
 """MCP tools for Antigravity (agy): antigravity_ask, antigravity_continue,
-antigravity_image, antigravity_image_swarm and antigravity_status.
+antigravity_image, antigravity_image_swarm, antigravity_job_result and
+antigravity_status.
 
 This was part of server.py. It registers its tools on server.mcp when server
 imports it, at the end of server's own import, and reaches server's helpers as
@@ -12,8 +13,11 @@ Import server, not this module: server resolves every name in __all__ as
 
 import asyncio
 import os
+import threading
 import time
-from typing import Optional, Union
+import uuid
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Union
 
 from fastmcp import Context
 
@@ -26,8 +30,142 @@ __all__ = [
     "antigravity_image",
     "_broadcast_workspaces",
     "antigravity_image_swarm",
+    "antigravity_job_result",
     "antigravity_status",
 ]
+
+
+# --------------------------------------------------------------------------
+# Image jobs
+#
+# MCP clients built on the official SDK, Claude Code among them, abandon a tool
+# call after about 60 s, and progress notifications do not extend that. An agy
+# image routinely takes 2-5 minutes, so the call failed with "Request timed out"
+# while agy went on to write the file anyway. The image tools therefore run
+# their work as a job in its own thread: the call waits up to `wait_sec`
+# (capped below that 60 s), returns the usual result if the job finished, and
+# otherwise returns `status: running` with a job_id for antigravity_job_result.
+#
+# Jobs live in memory. A server restart loses them, but not the files they
+# write, which land at the output path the starting call reported.
+# --------------------------------------------------------------------------
+
+_JOB_WAIT_DEFAULT_S = 45
+_JOB_WAIT_MAX_S = 50  # stays under the ~60 s client timeout with room to answer
+_JOB_RETENTION_S = 60 * 60  # how long a finished job's result can still be collected
+
+
+@dataclass
+class _ImageJob:
+    id: str
+    tool: str
+    paths: list[str]
+    timeout_s: int
+    started: float = field(default_factory=time.monotonic)
+    done: threading.Event = field(default_factory=threading.Event)
+    finished: Optional[float] = None
+    result: Optional[str] = None
+    error: Optional[BaseException] = None
+
+
+_IMAGE_JOBS: dict[str, _ImageJob] = {}
+_IMAGE_JOBS_LOCK = threading.Lock()
+
+
+def _purge_expired_jobs(now: Optional[float] = None) -> None:
+    now = time.monotonic() if now is None else now
+    with _IMAGE_JOBS_LOCK:
+        for job_id, job in list(_IMAGE_JOBS.items()):
+            if job.finished is not None and now - job.finished > _JOB_RETENTION_S:
+                del _IMAGE_JOBS[job_id]
+
+
+def _start_job(tool: str, paths: list[str], timeout_s: int, work: Callable[[], str]) -> _ImageJob:
+    """Run `work()` in a daemon thread and register it under a fresh job id.
+
+    The thread is the job's own, not a pool worker, so a long agy run never ties
+    up the executor that asyncio.to_thread and FastMCP's sync tools share.
+    """
+    _purge_expired_jobs()
+    job = _ImageJob(id=uuid.uuid4().hex, tool=tool, paths=list(paths), timeout_s=timeout_s)
+
+    def run() -> None:
+        try:
+            job.result = work()
+        except BaseException as e:  # handed to whoever collects the job, not swallowed
+            job.error = e
+        finally:
+            job.finished = time.monotonic()
+            job.done.set()
+
+    with _IMAGE_JOBS_LOCK:
+        _IMAGE_JOBS[job.id] = job
+    threading.Thread(target=run, name=f"agent-intern-{tool}-{job.id[:8]}", daemon=True).start()
+    return job
+
+
+def _get_job(job_id: str) -> Optional[_ImageJob]:
+    _purge_expired_jobs()
+    with _IMAGE_JOBS_LOCK:
+        return _IMAGE_JOBS.get((job_id or "").strip())
+
+
+def _clamp_wait(wait_sec) -> float:
+    """The seconds a call may wait: `wait_sec`, else the default, never over the max."""
+    try:
+        wait = float(wait_sec)
+    except (TypeError, ValueError):
+        wait = float(_JOB_WAIT_DEFAULT_S)
+    if wait != wait:  # NaN
+        wait = float(_JOB_WAIT_DEFAULT_S)
+    return max(0.0, min(wait, float(_JOB_WAIT_MAX_S)))
+
+
+async def _await_job(job: _ImageJob, wait_s: float, ctx: Optional[Context]) -> bool:
+    """Wait up to `wait_s` for the job, emitting MCP progress; True if it finished.
+
+    Waits in short slices so progress keeps flowing like _run_with_progress's.
+    Giving up the wait never cancels the job: that is the point of the job.
+    """
+    deadline = time.monotonic() + wait_s
+    while not job.done.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        await asyncio.to_thread(job.done.wait, min(remaining, server._PROGRESS_NOTIFY_INTERVAL_S))
+        if ctx is not None and not job.done.is_set():
+            elapsed = time.monotonic() - job.started
+            try:
+                await ctx.report_progress(
+                    progress=min(elapsed, float(job.timeout_s)),
+                    total=float(job.timeout_s),
+                    message=f"agy running ({int(elapsed)}s)",
+                )
+            except Exception:  # noqa: BLE001 — progress is cosmetic; never break the run
+                pass
+    return job.done.is_set()
+
+
+def _job_outcome(job: _ImageJob) -> str:
+    """A finished job's result, or its error raised exactly as the tool would have."""
+    if job.error is not None:
+        raise job.error
+    return job.result if job.result is not None else ""
+
+
+def _job_running_text(job: _ImageJob) -> str:
+    elapsed = int(time.monotonic() - job.started)
+    if len(job.paths) == 1:
+        where = f"output_path: {job.paths[0]}"
+    else:
+        where = "output_paths:\n" + "\n".join(f"  {p}" for p in job.paths)
+    return (
+        f"status: running\njob_id: {job.id}\ntool: {job.tool}\nelapsed: {elapsed}s\n{where}\n\n"
+        "agy is still generating. Call antigravity_job_result with this job_id to collect "
+        f"the result; each call waits up to wait_sec (default {_JOB_WAIT_DEFAULT_S}s, max "
+        f"{_JOB_WAIT_MAX_S}s). The image is saved even if nobody collects it, possibly with "
+        "its extension changed to match the real format."
+    )
 
 
 @server.mcp.tool(
@@ -212,6 +350,7 @@ async def antigravity_image(
     workspace: Optional[str] = None,
     timeout_s: int = 240,
     watch: bool = False,
+    wait_sec: int = _JOB_WAIT_DEFAULT_S,
     ctx: Optional[Context] = None,
 ) -> str:
     """Generate an image with Antigravity (Gemini image model via agy CLI).
@@ -226,6 +365,12 @@ async def antigravity_image(
     unsandboxed agy session — same privileges/caveats as the other tools (see the
     module SECURITY note).
 
+    Images often take longer than an MCP client will wait for one call (about
+    60 s), so the generation runs as a job. If it is not done within `wait_sec`,
+    this returns `status: running` and a `job_id` instead; call
+    antigravity_job_result with that job_id (repeatedly, if it is still running)
+    to get the same path/format/size result. The image is saved either way.
+
     Args:
         prompt: Description of the image to generate.
         output_path: Where to save. Absolute, or relative to `workspace`. If
@@ -236,36 +381,42 @@ async def antigravity_image(
         watch: If true, open the live "watch" window that streams agy's steps and
                shows the finished image inline (same return value, best-effort).
                Default false.
+        wait_sec: Seconds this call waits for the image before returning a job_id
+                  instead. Default 45, maximum 50, which keeps the call under the
+                  common 60-second client timeout.
     """
     ws = server._normalize_workspace(workspace)
     target = server._resolve_output_path(output_path, ws)
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     wrapped = server._wrap_image_prompt(prompt, target)
-    if watch:
-        return await asyncio.to_thread(
-            server._run_agy_image_watched, wrapped, target, ws, timeout_s, prompt
-        )
 
-    start = time.time()
-    agy_text: Optional[str] = None
-    agy_error: Optional[Exception] = None
-    try:
-        agy_text = await server._run_with_progress(
-            server._run_agy, (wrapped, ws, False, timeout_s), ctx, timeout_s
-        )
-    except RuntimeError as e:
-        # The transcript read may fail even though agy wrote the image. Don't
-        # lose a successfully generated file to a transcript hiccup — try to
-        # locate it anyway, and only surface this error if nothing was produced.
-        agy_error = e
+    def generate() -> str:
+        if watch:
+            return server._run_agy_image_watched(wrapped, target, ws, timeout_s, prompt)
 
-    try:
-        final_path, fmt, size = server._finalize_image(target, agy_text, start)
-    except RuntimeError as fin_err:
-        if agy_error is not None:
-            raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
-        raise
-    return f"{final_path}\nformat={fmt}  size={size} bytes"
+        start = time.time()
+        agy_text: Optional[str] = None
+        agy_error: Optional[Exception] = None
+        try:
+            agy_text = server._run_agy(wrapped, ws, False, timeout_s)
+        except RuntimeError as e:
+            # The transcript read may fail even though agy wrote the image. Don't
+            # lose a successfully generated file to a transcript hiccup — try to
+            # locate it anyway, and only surface this error if nothing was produced.
+            agy_error = e
+
+        try:
+            final_path, fmt, size = server._finalize_image(target, agy_text, start)
+        except RuntimeError as fin_err:
+            if agy_error is not None:
+                raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
+            raise
+        return f"{final_path}\nformat={fmt}  size={size} bytes"
+
+    job = _start_job("antigravity_image", [target], timeout_s, generate)
+    if await _await_job(job, _clamp_wait(wait_sec), ctx):
+        return _job_outcome(job)
+    return _job_running_text(job)
 
 
 def _broadcast_workspaces(workspaces: Optional[list], n: int):
@@ -290,13 +441,15 @@ def _broadcast_workspaces(workspaces: Optional[list], n: int):
         "openWorldHint": True,
     }
 )
-def antigravity_image_swarm(
+async def antigravity_image_swarm(
     prompts: list[str],
     output_paths: Optional[list[str]] = None,
     workspaces: Optional[list[str]] = None,
     max_concurrency: int = 4,
     timeout_s: int = 240,
     watch: bool = False,
+    wait_sec: int = _JOB_WAIT_DEFAULT_S,
+    ctx: Optional[Context] = None,
 ) -> str:
     """Generate several images IN PARALLEL with Antigravity (one worker per prompt).
 
@@ -305,6 +458,10 @@ def antigravity_image_swarm(
     final path/format/size (or its error). Extensions are corrected to the real
     bytes, exactly like antigravity_image. Same unsandboxed privileges/caveats as
     antigravity_swarm.
+
+    Runs as a job like antigravity_image: if the batch is not done within
+    `wait_sec`, this returns `status: running` and a `job_id`; collect the block
+    with antigravity_job_result.
 
     Args:
         prompts: One image description per parallel worker.
@@ -315,6 +472,8 @@ def antigravity_image_swarm(
         timeout_s: Per-worker timeout in seconds. Default 240 (images are slower).
         watch: If true, open the live dashboard; each finished image shows in its
                pane, and clicking a row opens that agent's window beside the dashboard.
+        wait_sec: Seconds this call waits for the whole batch before returning a
+                  job_id instead. Default 45, maximum 50.
     """
     import swarm
 
@@ -323,15 +482,60 @@ def antigravity_image_swarm(
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         base = workspaces[0] if workspaces else os.getcwd()
         output_paths = [os.path.join(base, f"agy-swarm-image-{stamp}-{i}.png") for i in range(n)]
-    results = swarm.swarm_image(
-        prompts,
-        output_paths,
-        workspaces=_broadcast_workspaces(workspaces, n),
-        max_concurrency=max_concurrency,
-        timeout_s=timeout_s,
-        watch=watch,
-    )
-    return swarm.format_image_results(results)
+
+    def generate() -> str:
+        results = swarm.swarm_image(
+            prompts,
+            output_paths,
+            workspaces=_broadcast_workspaces(workspaces, n),
+            max_concurrency=max_concurrency,
+            timeout_s=timeout_s,
+            watch=watch,
+        )
+        return swarm.format_image_results(results)
+
+    job = _start_job("antigravity_image_swarm", output_paths, timeout_s, generate)
+    if await _await_job(job, _clamp_wait(wait_sec), ctx):
+        return _job_outcome(job)
+    return _job_running_text(job)
+
+
+@server.mcp.tool(
+    annotations={
+        "title": "Collect a running Antigravity image job",
+        "readOnlyHint": True,  # only reads the job's in-memory state
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def antigravity_job_result(
+    job_id: str,
+    wait_sec: int = _JOB_WAIT_DEFAULT_S,
+    ctx: Optional[Context] = None,
+) -> str:
+    """Collect the result of an antigravity_image or antigravity_image_swarm job.
+
+    Use it when one of those calls returned `status: running` and a `job_id`.
+    Waits up to `wait_sec` for the job; if it finished, returns exactly what the
+    starting call would have (the path/format/size, or the same error). If it is
+    still running, returns `status: running` again: call this once more. A
+    finished result stays available for 60 minutes. Spends no quota.
+
+    Args:
+        job_id: The job_id from the status: running answer.
+        wait_sec: Seconds to wait before answering `status: running` again.
+                  Default 45, maximum 50.
+    """
+    job = _get_job(job_id)
+    if job is None:
+        raise RuntimeError(
+            f"Unknown job_id {job_id!r}. It may have expired (finished results are kept "
+            f"{_JOB_RETENTION_S // 60} minutes) or the server restarted. Any image it produced "
+            "is still at the output path the starting call reported."
+        )
+    if await _await_job(job, _clamp_wait(wait_sec), ctx):
+        return _job_outcome(job)
+    return _job_running_text(job)
 
 
 @server.mcp.tool(

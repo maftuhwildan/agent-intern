@@ -16,7 +16,9 @@ Generate an image for: $ARGUMENTS
    root. For several variations, call `antigravity_image_swarm` instead, with one prompt per
    variation.
 4. **Use the path the tool returns.** Gemini picks PNG or JPEG itself, and the tool renames the file to
-   match the real bytes, so `hero.png` may come back as `hero.jpg`.
+   match the real bytes, so `hero.png` may come back as `hero.jpg`. An image often takes a few
+   minutes; if the call answers `status: running` with a `job_id`, call `antigravity_job_result` with
+   that `job_id`, again each time it still says running, until it returns the path.
 5. **Look at the result.** Read the saved image and check it matches the request. If it clearly misses,
    for example the wrong subject or garbled text, say what's wrong and offer one retry with an
    adjusted prompt. Don't retry silently in a loop.
